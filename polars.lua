@@ -1,0 +1,271 @@
+--
+-- lua-polars: eager DataFrame bindings over the Rust Polars engine.
+--
+-- The module loads a small C ABI bridge (libpolars_lua.so / .dylib).  LuaJIT
+-- never calls Rust directly; every handle crossing the boundary is opaque.
+--
+local ffi = require("ffi")
+local json = require("polars.json")
+
+ffi.cdef[[
+typedef struct PlFrame PlFrame;
+
+const char *pl_version(void);
+
+PlFrame *pl_dataframe_read_csv(const char *path, char **err);
+PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
+void pl_dataframe_free(PlFrame *frame);
+int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
+char *pl_dataframe_schema_json(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
+PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
+char *pl_dataframe_to_json(PlFrame *frame, char **err);
+void pl_string_free(char *value);
+]]
+
+local function module_root()
+  local source = debug.getinfo(1, "S").source
+  if source:sub(1, 1) == "@" then
+    local path = source:sub(2)
+    return path:match("^(.*)[/\\][^/\\]+$") or "."
+  end
+  return "."
+end
+
+local function library_candidates()
+  local root = module_root()
+  local suffix = jit.os == "OSX" and ".dylib" or ".so"
+  local candidates = {
+    os.getenv("POLARS_LUA_LIB"),
+    root .. "/target/release/libpolars_lua" .. suffix,
+    root .. "/target/debug/libpolars_lua" .. suffix,
+    root .. "/build/libpolars_lua" .. suffix,
+  }
+  local result = {}
+  for _, candidate in ipairs(candidates) do
+    if candidate and candidate ~= "" then
+      result[#result + 1] = candidate
+    end
+  end
+  return result
+end
+
+local lib
+local load_errors = {}
+for _, candidate in ipairs(library_candidates()) do
+  local ok, loaded = pcall(ffi.load, candidate)
+  if ok then
+    lib = loaded
+    break
+  end
+  load_errors[#load_errors + 1] = candidate .. ": " .. tostring(loaded)
+end
+if lib == nil then
+  local ok, loaded = pcall(ffi.load, "polars_lua")
+  if ok then
+    lib = loaded
+  else
+    load_errors[#load_errors + 1] = "polars_lua: " .. tostring(loaded)
+  end
+end
+if lib == nil then
+  error("lua-polars: could not load the native bridge; tried\n  " ..
+    table.concat(load_errors, "\n  "), 2)
+end
+
+local function take_error(err)
+  local pointer = err[0]
+  if pointer == nil then
+    return "unknown Polars error"
+  end
+  local message = ffi.string(pointer)
+  lib.pl_string_free(pointer)
+  err[0] = nil
+  return message
+end
+
+local function string_result(pointer, err)
+  if pointer == nil then
+    error(take_error(err), 3)
+  end
+  local value = ffi.string(pointer)
+  lib.pl_string_free(pointer)
+  return value
+end
+
+local DataFrame = {}
+DataFrame.__index = DataFrame
+
+local function new_frame(pointer, err)
+  if pointer == nil then
+    error(take_error(err), 3)
+  end
+  return setmetatable({ _ptr = pointer }, DataFrame)
+end
+
+function DataFrame:_require_open()
+  if self._ptr == nil then
+    error("DataFrame is closed", 2)
+  end
+  return self._ptr
+end
+
+function DataFrame:close()
+  local pointer = self._ptr
+  if pointer ~= nil then
+    self._ptr = nil
+    lib.pl_dataframe_free(pointer)
+  end
+end
+
+DataFrame.__gc = DataFrame.close
+
+function DataFrame:shape()
+  local rows = ffi.new("uint64_t[1]")
+  local cols = ffi.new("uint64_t[1]")
+  local status = lib.pl_dataframe_shape(self:_require_open(), rows, cols)
+  if status ~= 0 then
+    error("could not read DataFrame shape (status " .. status .. ")", 2)
+  end
+  return tonumber(rows[0]), tonumber(cols[0])
+end
+
+function DataFrame:schema()
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_schema_json(self:_require_open(), err)
+  return json.decode(string_result(pointer, err))
+end
+
+function DataFrame:head(count)
+  count = count == nil and 5 or count
+  if type(count) ~= "number" or count < 0 or count % 1 ~= 0 then
+    error("head count must be a non-negative integer", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_head(self:_require_open(), count, err)
+  return new_frame(pointer, err)
+end
+
+function DataFrame:sql(query)
+  if type(query) ~= "string" or query == "" then
+    error("sql query must be a non-empty string", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_sql(self:_require_open(), query, err)
+  return new_frame(pointer, err)
+end
+
+function DataFrame:to_json()
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_to_json(self:_require_open(), err)
+  return string_result(pointer, err)
+end
+
+function DataFrame:to_table()
+  return json.decode(self:to_json())
+end
+
+local function as_list(value, label)
+  if type(value) == "table" then
+    return value
+  end
+  if type(value) == "string" and value ~= "" then
+    return { value }
+  end
+  error(label .. " must be a column name or a list of names", 3)
+end
+
+local function quote_identifier(name)
+  if type(name) ~= "string" or name == "" then
+    error("column names must be non-empty strings", 3)
+  end
+  return '"' .. name:gsub('"', '""') .. '"'
+end
+
+function DataFrame:select(...)
+  local columns = { ... }
+  if #columns == 1 and type(columns[1]) == "table" then
+    columns = columns[1]
+  end
+  if #columns == 0 then
+    error("select expects at least one column", 2)
+  end
+  local quoted = {}
+  for index, name in ipairs(columns) do
+    quoted[index] = quote_identifier(name)
+  end
+  return self:sql("SELECT " .. table.concat(quoted, ", ") .. " FROM df")
+end
+
+function DataFrame:filter(condition)
+  if type(condition) ~= "string" or condition == "" then
+    error("filter condition must be a non-empty SQL expression", 2)
+  end
+  return self:sql("SELECT * FROM df WHERE " .. condition)
+end
+
+function DataFrame:sort(columns, descending)
+  columns = as_list(columns, "sort columns")
+  local quoted = {}
+  for index, name in ipairs(columns) do
+    local direction = descending
+    if type(descending) == "table" then
+      direction = descending[index]
+    end
+    quoted[index] = quote_identifier(name) .. (direction and " DESC" or " ASC")
+  end
+  return self:sql("SELECT * FROM df ORDER BY " .. table.concat(quoted, ", "))
+end
+
+function DataFrame:group_by(keys, aggregates)
+  keys = as_list(keys, "group keys")
+  if type(aggregates) ~= "table" or #aggregates == 0 then
+    error("group_by aggregates must be a non-empty list of SQL expressions", 2)
+  end
+  local select = {}
+  for _, key in ipairs(keys) do
+    select[#select + 1] = quote_identifier(key)
+  end
+  for _, expression in ipairs(aggregates) do
+    if type(expression) ~= "string" or expression == "" then
+      error("group_by aggregates must be non-empty SQL expressions", 2)
+    end
+    select[#select + 1] = expression
+  end
+  local group = {}
+  for index, key in ipairs(keys) do
+    group[index] = quote_identifier(key)
+  end
+  return self:sql("SELECT " .. table.concat(select, ", ") ..
+    " FROM df GROUP BY " .. table.concat(group, ", "))
+end
+
+local polars = {
+  _VERSION = "0.1.0",
+  null = json.null,
+  DataFrame = DataFrame,
+}
+
+function polars.version()
+  return ffi.string(lib.pl_version())
+end
+
+function polars.read_csv(path)
+  if type(path) ~= "string" or path == "" then
+    error("read_csv path must be a non-empty string", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_read_csv(path, err)
+  return new_frame(pointer, err)
+end
+
+function polars.read_parquet(path)
+  if type(path) ~= "string" or path == "" then
+    error("read_parquet path must be a non-empty string", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_read_parquet(path, err)
+  return new_frame(pointer, err)
+end
+
+return polars

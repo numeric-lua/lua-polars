@@ -1,0 +1,8 @@
+/target/
+/.cargo/
+*.so
+*.dylib
+*.dll
+*.o
+*.tmp
+.luacov
