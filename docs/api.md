@@ -85,6 +85,36 @@ df:group_by("team", { 'sum("score") AS total' })
 
 Aggregate expressions are trusted SQL strings.
 
+### `df:join(other, options) -> DataFrame`
+
+Eagerly joins `df` (the left frame) with `other` (the right frame). Both frames
+stay open; the result is a new frame.
+
+```lua
+local joined = left:join(right, {
+  on = { "region", "id" },  -- same keys on both sides
+  how = "left",
+})
+```
+
+`options` fields:
+
+- `on`: a column name or list of names. Uses the same keys on both frames.
+- `left_on`, `right_on`: column names or lists for each side. Use these instead
+  of `on` when the key names differ.
+- `how`: `"inner"` (default) or `"left"`. Other values are rejected.
+- `nulls_equal`: optional boolean (default `false`). When false, null keys do
+  not match; when true, null keys match null keys.
+
+Key lists must be non-empty, have the same length on both sides, contain no
+duplicate names, and name columns that exist in the corresponding frame. The
+result coalesces the join keys into one set of columns. Left joins keep every
+left row; right columns are null when no key matches. Duplicate non-key column
+names are suffixed by Polars (`_right`).
+
+The error path covers missing keys, duplicate keys, mismatched key counts,
+invalid join types, invalid options, and closed handles.
+
 ### `df:to_json() -> string`
 
 Row-oriented JSON array, one object per row. Non-JSON types are formatted by
@@ -111,6 +141,11 @@ void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
+PlFrame *pl_dataframe_join(
+    PlFrame *left, PlFrame *right, const char *how,
+    const char *const *left_on, uint64_t left_count,
+    const char *const *right_on, uint64_t right_count,
+    int32_t nulls_equal, char **err);
 PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
@@ -118,10 +153,13 @@ void pl_string_free(char *value);
 
 Returned `char *` values and error strings must be freed with
 `pl_string_free`. A null frame pointer indicates an error when `err` is set.
+`pl_dataframe_join` borrows both input handles, including the key-name arrays
+for the duration of the call, and returns a newly owned frame.
 
 ## Roadmap
 
-1. LazyFrame/expressions and joins.
-2. Arrow C Data Interface with `polars-ffi` and a numlua adapter.
-3. CSV/Parquet writers and scan APIs.
-4. LuaRocks packaging and CI with a cached Polars build.
+- [x] Eager inner/left DataFrame joins.
+- [ ] LazyFrame/expressions and the remaining join types.
+- [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.
+- [ ] CSV/Parquet writers and scan APIs.
+- [ ] LuaRocks packaging and CI with a cached Polars build.

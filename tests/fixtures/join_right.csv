@@ -1,0 +1,5 @@
+id,score,active
+1,10,true
+2,20,true
+3,30,false
+7,70,false

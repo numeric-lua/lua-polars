@@ -32,10 +32,11 @@ end
 - schema, shape, head
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, and group-by
+- eager inner and left joins on one or more keys
 - row-oriented `to_table()` and raw `to_json()`
 - explicit `:close()` plus Lua GC finalization
 
-Not implemented yet: LazyFrame expressions, joins through the Lua API, Arrow
+Not implemented yet: LazyFrame expressions, the remaining join types, Arrow
 zero-copy exchange, writes, streaming, and a LuaRocks package.
 
 ## Requirements
@@ -61,7 +62,8 @@ make test
 ```
 
 The test suite is dependency-free and covers CSV parsing, schema, projection,
-filtering, sorting, grouping, SQL, JSON conversion, and error paths.
+filtering, sorting, grouping, inner/left joins, SQL, JSON conversion, and error
+paths.
 
 ## API
 
@@ -80,6 +82,7 @@ df:select("a", "b")
 df:filter('"a" > 3')
 df:sort("a", true)
 df:group_by("team", { 'sum("score") AS total' })
+df:join(other, { on = "id", how = "left" })
 df:to_table()
 df:to_json()
 df:close()

@@ -2,8 +2,9 @@
 //!
 //! The exported surface is deliberately small and eager-first: read CSV or
 //! Parquet, inspect the schema/shape, take a head, run a SQL query against a
-//! DataFrame registered as `df`, and serialize rows as JSON.  LazyFrame and
-//! Arrow C Data entry points can be added without changing these handles.
+//! DataFrame registered as `df`, join two DataFrames eagerly, and serialize
+//! rows as JSON.  LazyFrame and Arrow C Data entry points can be added without
+//! changing these handles.
 
 use std::ffi::{CStr, CString};
 use std::fs::File;
@@ -21,14 +22,59 @@ pub struct PlFrame {
     df: DataFrame,
 }
 
-unsafe fn read_path(ptr: *const c_char) -> Result<String, String> {
+unsafe fn read_utf8(ptr: *const c_char, label: &str) -> Result<String, String> {
     if ptr.is_null() {
-        return Err("path is null".to_string());
+        return Err(format!("{label} is null"));
     }
     CStr::from_ptr(ptr)
         .to_str()
         .map(|value| value.to_string())
-        .map_err(|_| "path is not valid UTF-8".to_string())
+        .map_err(|_| format!("{label} is not valid UTF-8"))
+}
+
+unsafe fn read_path(ptr: *const c_char) -> Result<String, String> {
+    read_utf8(ptr, "path")
+}
+
+unsafe fn read_key_list(
+    ptr: *const *const c_char,
+    count: u64,
+    side: &str,
+) -> Result<Vec<String>, String> {
+    if count == 0 {
+        return Err(format!("{side} join keys must not be empty"));
+    }
+    if ptr.is_null() {
+        return Err(format!("{side} join keys are null"));
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| format!("{side} join key count is too large"))?;
+    let raw = std::slice::from_raw_parts(ptr, count);
+    let mut keys = Vec::with_capacity(count);
+    for (index, &key_ptr) in raw.iter().enumerate() {
+        let key = read_utf8(key_ptr, &format!("{side} join key at index {index}"))?;
+        if key.is_empty() {
+            return Err(format!("{side} join key at index {index} must not be empty"));
+        }
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn validate_keys(df: &DataFrame, keys: &[String], side: &str) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for key in keys {
+        if !seen.insert(key.as_str()) {
+            return Err(format!("duplicate {side} join key '{key}'"));
+        }
+        if df.get_column_index(key.as_str()).is_none() {
+            return Err(format!(
+                "{side} join key '{key}' is not a column in the {side} DataFrame"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn c_string(value: &str) -> *mut c_char {
@@ -183,6 +229,51 @@ pub unsafe extern "C" fn pl_dataframe_head(
             return Err("head count must be non-negative".to_string());
         }
         Ok(frame.df.head(Some(n as usize)))
+    }));
+    finish_frame(result, err)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_join(
+    left_ptr: *mut PlFrame,
+    right_ptr: *mut PlFrame,
+    how: *const c_char,
+    left_on: *const *const c_char,
+    left_count: u64,
+    right_on: *const *const c_char,
+    right_count: u64,
+    nulls_equal: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let left = frame_ref(left_ptr)?;
+        let right = frame_ref(right_ptr)?;
+        let how = read_utf8(how, "join type")?;
+        let join_type = match how.to_ascii_lowercase().as_str() {
+            "inner" => JoinType::Inner,
+            "left" => JoinType::Left,
+            other => {
+                return Err(format!(
+                    "invalid join type '{other}'; expected 'inner' or 'left'"
+                ))
+            },
+        };
+        let left_keys = read_key_list(left_on, left_count, "left")?;
+        let right_keys = read_key_list(right_on, right_count, "right")?;
+        if left_keys.len() != right_keys.len() {
+            return Err(format!(
+                "join key count mismatch: left has {}, right has {}",
+                left_keys.len(),
+                right_keys.len()
+            ));
+        }
+        validate_keys(&left.df, &left_keys, "left")?;
+        validate_keys(&right.df, &right_keys, "right")?;
+        let mut args = JoinArgs::new(join_type);
+        args.nulls_equal = nulls_equal != 0;
+        left.df
+            .join(&right.df, left_keys.iter(), right_keys.iter(), args, None)
+            .map_err(|error| error.to_string())
     }));
     finish_frame(result, err)
 }

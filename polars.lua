@@ -18,6 +18,11 @@ void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
+PlFrame *pl_dataframe_join(
+    PlFrame *left, PlFrame *right, const char *how,
+    const char *const *left_on, uint64_t left_count,
+    const char *const *right_on, uint64_t right_count,
+    int32_t nulls_equal, char **err);
 PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
@@ -175,6 +180,26 @@ local function as_list(value, label)
   error(label .. " must be a column name or a list of names", 3)
 end
 
+local function key_list(value, label)
+  local keys = as_list(value, label)
+  if #keys == 0 then
+    error(label .. " must not be empty", 3)
+  end
+  local seen = {}
+  local result = {}
+  for index, key in ipairs(keys) do
+    if type(key) ~= "string" or key == "" then
+      error(label .. " entries must be non-empty strings", 3)
+    end
+    if seen[key] then
+      error("duplicate " .. label .. " '" .. key .. "'", 3)
+    end
+    seen[key] = true
+    result[index] = key
+  end
+  return result
+end
+
 local function quote_identifier(name)
   if type(name) ~= "string" or name == "" then
     error("column names must be non-empty strings", 3)
@@ -238,6 +263,72 @@ function DataFrame:group_by(keys, aggregates)
   end
   return self:sql("SELECT " .. table.concat(select, ", ") ..
     " FROM df GROUP BY " .. table.concat(group, ", "))
+end
+
+function DataFrame:join(other, options)
+  local self_ptr = self:_require_open()
+  if getmetatable(other) ~= DataFrame then
+    error("join expects another DataFrame", 2)
+  end
+  local other_ptr = other:_require_open()
+  if type(options) ~= "table" then
+    error("join options must be a table", 2)
+  end
+
+  local how = options.how
+  if how == nil then
+    how = "inner"
+  end
+  if type(how) ~= "string" or how == "" then
+    error("join type must be 'inner' or 'left'", 2)
+  end
+  how = how:lower()
+  if how ~= "inner" and how ~= "left" then
+    error("invalid join type '" .. tostring(options.how) ..
+      "'; expected 'inner' or 'left'", 2)
+  end
+
+  local left_keys, right_keys
+  if options.on ~= nil then
+    if options.left_on ~= nil or options.right_on ~= nil then
+      error("join accepts either on or left_on/right_on, not both", 2)
+    end
+    left_keys = key_list(options.on, "join keys")
+    right_keys = left_keys
+  else
+    if options.left_on == nil or options.right_on == nil then
+      error("join requires on or both left_on and right_on", 2)
+    end
+    left_keys = key_list(options.left_on, "left join keys")
+    right_keys = key_list(options.right_on, "right join keys")
+  end
+  if #left_keys ~= #right_keys then
+    error(string.format("join key count mismatch: left has %d, right has %d",
+      #left_keys, #right_keys), 2)
+  end
+
+  local nulls_equal = options.nulls_equal
+  if nulls_equal == nil then
+    nulls_equal = false
+  end
+  if type(nulls_equal) ~= "boolean" then
+    error("join nulls_equal must be a boolean", 2)
+  end
+
+  local left_on = ffi.new("const char *[?]", #left_keys)
+  local right_on = ffi.new("const char *[?]", #right_keys)
+  for index, key in ipairs(left_keys) do
+    left_on[index - 1] = key
+  end
+  for index, key in ipairs(right_keys) do
+    right_on[index - 1] = key
+  end
+
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_join(self_ptr, other_ptr, how,
+    left_on, #left_keys, right_on, #right_keys,
+    nulls_equal and 1 or 0, err)
+  return new_frame(pointer, err)
 end
 
 local polars = {

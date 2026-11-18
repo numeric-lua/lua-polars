@@ -1,0 +1,6 @@
+region,id,price
+north,1,100
+north,2,250
+south,1,75
+south,2,150
+east,1,50
