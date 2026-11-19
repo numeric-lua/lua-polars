@@ -127,7 +127,7 @@ unsafe fn finish_frame(
 
 #[no_mangle]
 pub extern "C" fn pl_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.1.0\0";
+    static VERSION: &[u8] = b"0.2.0\0";
     VERSION.as_ptr() as *const c_char
 }
 
@@ -252,12 +252,20 @@ pub unsafe extern "C" fn pl_dataframe_join(
         let join_type = match how.to_ascii_lowercase().as_str() {
             "inner" => JoinType::Inner,
             "left" => JoinType::Left,
-            other => {
-                return Err(format!(
-                    "invalid join type '{other}'; expected 'inner' or 'left'"
-                ))
-            },
+            "full" | "outer" => JoinType::Full,
+            "semi" => JoinType::Semi,
+            "anti" => JoinType::Anti,
+            "cross" => JoinType::Cross,
+            other => return Err(format!(
+                "invalid join type '{other}'; expected inner, left, full, semi, anti, or cross")),
         };
+        if join_type == JoinType::Cross {
+            let mut args = JoinArgs::new(join_type);
+            args.nulls_equal = nulls_equal != 0;
+            return left.df.join(&right.df, Vec::<String>::new().iter(),
+                Vec::<String>::new().iter(), args, None)
+                .map_err(|error| error.to_string());
+        }
         let left_keys = read_key_list(left_on, left_count, "left")?;
         let right_keys = read_key_list(right_on, right_count, "right")?;
         if left_keys.len() != right_keys.len() {
