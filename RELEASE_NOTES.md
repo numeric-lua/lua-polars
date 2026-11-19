@@ -1,5 +1,4 @@
-# lua-polars 0.2.0
+# lua-polars 0.3.0
 
-- eager inner/left/full/semi/anti/cross joins;
-- rebuilt and verified against Polars 0.55.2;
-- 30 tests.
+- full/outer, semi, anti, and cross joins;
+- 31 tests, all passing.

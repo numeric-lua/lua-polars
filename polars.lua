@@ -280,12 +280,30 @@ function DataFrame:join(other, options)
     how = "inner"
   end
   if type(how) ~= "string" or how == "" then
-    error("join type must be 'inner' or 'left'", 2)
+    error("join type is required", 2)
   end
   how = how:lower()
-  if how ~= "inner" and how ~= "left" then
+  local valid = { inner=true, left=true, full=true, outer=true, semi=true,
+    anti=true, cross=true }
+  if not valid[how] then
     error("invalid join type '" .. tostring(options.how) ..
-      "'; expected 'inner' or 'left'", 2)
+      "'; expected inner, left, full, semi, anti, or cross", 2)
+  end
+
+  if how == "cross" then
+    if options.on ~= nil or options.left_on ~= nil or
+        options.right_on ~= nil then
+      error("cross join does not accept keys", 2)
+    end
+    local nulls_equal = options.nulls_equal
+    if nulls_equal == nil then nulls_equal = false end
+    if type(nulls_equal) ~= "boolean" then
+      error("join nulls_equal must be a boolean", 2)
+    end
+    local err = ffi.new("char *[1]")
+    local pointer = lib.pl_dataframe_join(self_ptr, other_ptr, how, nil, 0,
+      nil, 0, nulls_equal and 1 or 0, err)
+    return new_frame(pointer, err)
   end
 
   local left_keys, right_keys
@@ -332,7 +350,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.2.0",
+  _VERSION = "0.3.0",
   null = json.null,
   DataFrame = DataFrame,
 }

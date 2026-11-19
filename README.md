@@ -26,7 +26,7 @@ end
 
 ## Status
 
-`0.2.0` is an eager-first MVP:
+`0.3.0` is an eager-first MVP:
 
 - CSV and Parquet readers
 - schema, shape, head
@@ -36,7 +36,7 @@ end
 - row-oriented `to_table()` and raw `to_json()`
 - explicit `:close()` plus Lua GC finalization
 
-Not implemented yet: LazyFrame expressions, the remaining join types, Arrow
+Not implemented yet: LazyFrame expressions, Arrow
 zero-copy exchange, writes, streaming, and a LuaRocks package.
 
 ## Requirements

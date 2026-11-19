@@ -1,10 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- eager full/outer, semi, anti, and cross joins;
+- join-type tests;
+- 31 tests.
+
 ## 0.2.0
 
-- eager inner/left/full/semi/anti/cross joins;
-- 30 tests.
-
-## 0.1.0
-
-- initial eager CSV/Parquet/SQL binding.
+- eager inner/left joins.
