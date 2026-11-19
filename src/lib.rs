@@ -127,7 +127,7 @@ unsafe fn finish_frame(
 
 #[no_mangle]
 pub extern "C" fn pl_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.3.0\0";
+    static VERSION: &[u8] = b"0.4.0\0";
     VERSION.as_ptr() as *const c_char
 }
 
@@ -343,5 +343,47 @@ pub unsafe extern "C" fn pl_dataframe_to_json(
 pub unsafe extern "C" fn pl_string_free(value: *mut c_char) {
     if !value.is_null() {
         drop(CString::from_raw(value));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_csv(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let file = File::create(&path).map_err(|error| error.to_string())?;
+        let mut df = frame.df.clone();
+        CsvWriter::new(file).finish(&mut df).map_err(|error| error.to_string())?;
+        Ok(())
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(message)) => { set_error(err, message); 1 }
+        Err(_) => { set_error(err, "write_csv panicked"); 1 }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_parquet(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let file = File::create(&path).map_err(|error| error.to_string())?;
+        let mut df = frame.df.clone();
+        ParquetWriter::new(file).finish(&mut df).map_err(|error| error.to_string())?;
+        Ok(())
+    }));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(message)) => { set_error(err, message); 1 }
+        Err(_) => { set_error(err, "write_parquet panicked"); 1 }
     }
 }

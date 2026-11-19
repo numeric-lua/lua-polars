@@ -24,6 +24,8 @@ PlFrame *pl_dataframe_join(
     const char *const *right_on, uint64_t right_count,
     int32_t nulls_equal, char **err);
 PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
+int pl_dataframe_write_csv(PlFrame *frame, const char *path, char **err);
+int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ]]
@@ -159,6 +161,69 @@ function DataFrame:sql(query)
   local pointer = lib.pl_dataframe_sql(self:_require_open(), query, err)
   return new_frame(pointer, err)
 end
+
+local function quote_ident(name)
+  return '"' .. tostring(name):gsub('"', '""') .. '"'
+end
+
+function DataFrame:sql_select(columns, suffix)
+  local parts = {}
+  for _, column in ipairs(columns) do parts[#parts + 1] = quote_ident(column) end
+  if suffix and #suffix > 0 then
+    for _, expression in ipairs(suffix) do parts[#parts + 1] = expression end
+  end
+  return self:sql("SELECT " .. table.concat(parts, ", ") .. " FROM df")
+end
+
+function DataFrame:drop(...)
+  local drop = {}
+  for _, name in ipairs({ ... }) do drop[name] = true end
+  local columns = {}
+  for name in pairs(self:schema()) do
+    if not drop[name] then columns[#columns + 1] = name end
+  end
+  table.sort(columns)
+  return self:sql_select(columns)
+end
+
+function DataFrame:rename(mapping)
+  if type(mapping) ~= "table" then error("rename expects a table", 2) end
+  local columns = {}
+  for name in pairs(self:schema()) do columns[#columns + 1] = name end
+  table.sort(columns)
+  local parts = {}
+  for _, name in ipairs(columns) do
+    if mapping[name] ~= nil then
+      parts[#parts + 1] = quote_ident(name) .. " AS " .. quote_ident(mapping[name])
+    else parts[#parts + 1] = quote_ident(name) end
+  end
+  return self:sql("SELECT " .. table.concat(parts, ", ") .. " FROM df")
+end
+
+function DataFrame:with_columns(...)
+  local expressions = { ... }
+  local columns = {}
+  for name in pairs(self:schema()) do columns[#columns + 1] = name end
+  table.sort(columns)
+  local parts = {}
+  for _, name in ipairs(columns) do parts[#parts + 1] = quote_ident(name) end
+  for _, expression in ipairs(expressions) do parts[#parts + 1] = expression end
+  return self:sql("SELECT " .. table.concat(parts, ", ") .. " FROM df")
+end
+
+local function write_frame(self, path, method)
+  if type(path) ~= "string" or path == "" then error(method .. " path must be a string", 2) end
+  local err = ffi.new("char *[1]")
+  local status = lib[method](self:_require_open(), path, err)
+  if status ~= 0 then
+    local message = err[0] ~= nil and ffi.string(err[0]) or method .. " failed"
+    error(message, 2)
+  end
+  return self
+end
+
+function DataFrame:write_csv(path) return write_frame(self, path, "pl_dataframe_write_csv") end
+function DataFrame:write_parquet(path) return write_frame(self, path, "pl_dataframe_write_parquet") end
 
 function DataFrame:to_json()
   local err = ffi.new("char *[1]")
@@ -350,7 +415,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.3.0",
+  _VERSION = "0.4.0",
   null = json.null,
   DataFrame = DataFrame,
 }

@@ -26,7 +26,7 @@ end
 
 ## Status
 
-`0.3.0` is an eager-first MVP:
+`0.4.0` is an eager-first MVP:
 
 - CSV and Parquet readers
 - schema, shape, head

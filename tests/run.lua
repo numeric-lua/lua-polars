@@ -58,10 +58,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.3.0")
+  eq(polars.version(), "0.4.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.3.0")
+  eq(polars._VERSION, "0.4.0")
 end)
 
 current = "csv"
@@ -414,6 +414,22 @@ end)
 test("null sentinel is available", function()
   truthy(polars.null ~= nil, "null sentinel")
   eq(tostring(polars.null), "null")
+end)
+
+test("writes CSV and Parquet and supports column operations", function()
+  local df = polars.read_csv(join_left)
+  local dir = os.getenv("TMPDIR") or "/tmp"
+  local csv, parquet = dir .. "/lua-polars-out.csv", dir .. "/lua-polars-out.parquet"
+  df:write_csv(csv); df:write_parquet(parquet)
+  local loaded = polars.read_csv(csv); eq(select(1, loaded:shape()), 5); loaded:close()
+  local p = polars.read_parquet(parquet); eq(select(1, p:shape()), 5); p:close()
+  local dropped = df:drop("team"); eq(select(2, dropped:shape()), 2); dropped:close()
+  local renamed = df:rename({ name = "person" })
+  truthy(renamed:schema().person ~= nil, "renamed column"); renamed:close()
+  local with = df:with_columns('"id" * 2 AS double_id')
+  truthy(with:schema().double_id ~= nil, "with_columns column"); with:close()
+  os.remove(csv); os.remove(parquet)
+  df:close()
 end)
 
 io.write(string.format("\n\n%d tests, %d passed, %d failed\n", passed + failed,

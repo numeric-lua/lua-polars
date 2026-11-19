@@ -1,4 +1,5 @@
-# lua-polars 0.3.0
+# lua-polars 0.4.0
 
-- full/outer, semi, anti, and cross joins;
-- 31 tests, all passing.
+- CSV and Parquet writers;
+- drop/rename/with_columns helpers;
+- 32 tests.
