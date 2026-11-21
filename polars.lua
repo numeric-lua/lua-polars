@@ -18,6 +18,10 @@ PlFrame *pl_dataframe_read_csv_options(
 PlFrame *pl_dataframe_read_csv_ex(
     const char *path, const char *delimiter, int32_t has_header,
     const char *quote, const char *comment, char **err);
+PlFrame *pl_dataframe_read_csv_projected(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -517,6 +521,7 @@ local CSV_OPTION_KEYS = {
   header = true,
   quote = true,
   comment = true,
+  columns = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -543,9 +548,42 @@ local function csv_byte_option(options, key, default)
   return value
 end
 
+local function csv_columns(value)
+  if value == nil then
+    return nil
+  end
+  local columns
+  if type(value) == "string" then
+    columns = { value }
+  elseif type(value) == "table" then
+    columns = value
+  else
+    error("read_csv columns must be a column name or a list of names", 3)
+  end
+  if #columns == 0 then
+    error("read_csv columns must not be empty", 3)
+  end
+  local seen = {}
+  local result = {}
+  for index, name in ipairs(columns) do
+    if type(name) ~= "string" or name == "" then
+      error("read_csv columns entries must be non-empty strings", 3)
+    end
+    if seen[name] then
+      error("duplicate read_csv column '" .. name .. "'", 3)
+    end
+    seen[name] = true
+    result[index] = name
+  end
+  if #result == 0 then
+    error("read_csv columns must not be empty", 3)
+  end
+  return result
+end
+
 local function csv_options(options)
   if options == nil then
-    return ",", true, '"', ""
+    return ",", true, '"', "", nil
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -567,17 +605,28 @@ local function csv_options(options)
   end
   local quote = csv_byte_option(options, "quote", '"')
   local comment = csv_byte_option(options, "comment", "")
-  return delimiter, header, quote, comment
+  local columns = csv_columns(options.columns)
+  return delimiter, header, quote, comment, columns
 end
 
 function polars.read_csv(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_csv path must be a non-empty string", 2)
   end
-  local delimiter, header, quote, comment = csv_options(options)
+  local delimiter, header, quote, comment, columns = csv_options(options)
   local err = ffi.new("char *[1]")
-  local pointer = lib.pl_dataframe_read_csv_ex(path, delimiter,
-    header and 1 or 0, quote, comment, err)
+  local pointer
+  if columns == nil then
+    pointer = lib.pl_dataframe_read_csv_ex(path, delimiter,
+      header and 1 or 0, quote, comment, err)
+  else
+    local names = ffi.new("const char *[?]", #columns)
+    for index, name in ipairs(columns) do
+      names[index - 1] = name
+    end
+    pointer = lib.pl_dataframe_read_csv_projected(path, delimiter,
+      header and 1 or 0, quote, comment, names, #columns, err)
+  end
   return new_frame(pointer, err)
 end
 

@@ -12,6 +12,7 @@ use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::Arc;
 
 use polars::prelude::*;
 use polars::sql::SQLContext;
@@ -39,12 +40,13 @@ unsafe fn read_path(ptr: *const c_char) -> Result<String, String> {
 const DEFAULT_CSV_DELIMITER: u8 = b',';
 const DEFAULT_CSV_QUOTE: u8 = b'"';
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct CsvReadConfig {
     delimiter: u8,
     has_header: bool,
     quote: Option<u8>,
     comment: Option<u8>,
+    columns: Option<Vec<String>>,
 }
 
 impl Default for CsvReadConfig {
@@ -54,6 +56,7 @@ impl Default for CsvReadConfig {
             has_header: true,
             quote: Some(DEFAULT_CSV_QUOTE),
             comment: None,
+            columns: None,
         }
     }
 }
@@ -120,6 +123,40 @@ unsafe fn read_csv_comment(ptr: *const c_char) -> Result<Option<u8>, String> {
     read_optional_byte(ptr, "comment")
 }
 
+/// Reads an optional CSV projection from the C ABI.
+///
+/// A null pointer or a zero count leaves the projection disabled. Column names
+/// are borrowed for the duration of the call; empty and duplicate names are
+/// rejected so the caller gets a precise error instead of a parser surprise.
+unsafe fn read_csv_columns(
+    ptr: *const *const c_char,
+    count: u64,
+) -> Result<Option<Vec<String>>, String> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if ptr.is_null() {
+        return Err("CSV columns are null".to_string());
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| "CSV column count is too large".to_string())?;
+    let raw = std::slice::from_raw_parts(ptr, count);
+    let mut seen = std::collections::HashSet::new();
+    let mut columns = Vec::with_capacity(count);
+    for (index, &column_ptr) in raw.iter().enumerate() {
+        let column = read_utf8(column_ptr, &format!("CSV column at index {index}"))?;
+        if column.is_empty() {
+            return Err(format!("CSV column at index {index} must not be empty"));
+        }
+        if !seen.insert(column.clone()) {
+            return Err(format!("duplicate CSV column '{column}'"));
+        }
+        columns.push(column);
+    }
+    Ok(Some(columns))
+}
+
 fn validate_csv_config(config: &CsvReadConfig) -> Result<(), String> {
     if config.quote == Some(config.delimiter) {
         return Err("CSV quote character must differ from the delimiter".to_string());
@@ -135,8 +172,15 @@ fn validate_csv_config(config: &CsvReadConfig) -> Result<(), String> {
 
 fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String> {
     validate_csv_config(&config)?;
-    CsvReadOptions::default()
+    let columns: Option<Arc<[PlSmallStr]>> = config.columns.as_ref().map(|columns| {
+        columns
+            .iter()
+            .map(|name| PlSmallStr::from_str(name.as_str()))
+            .collect()
+    });
+    let frame = CsvReadOptions::default()
         .with_has_header(config.has_header)
+        .with_columns(columns)
         .map_parse_options(|options| {
             options
                 .with_separator(config.delimiter)
@@ -146,7 +190,15 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
         .try_into_reader_with_file_path(Some(PathBuf::from(path)))
         .map_err(|error| error.to_string())?
         .finish()
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // Polars keeps the file column order for a projection. Re-select with the
+    // requested names so callers get the order they asked for, like `select`.
+    match &config.columns {
+        Some(columns) => frame
+            .select(columns.iter().map(|name| name.as_str()))
+            .map_err(|error| error.to_string()),
+        None => Ok(frame),
+    }
 }
 
 unsafe fn read_key_list(
@@ -288,6 +340,9 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_options(
 /// parsing. A null or empty `comment` disables comment lines; otherwise the
 /// first byte of each line is compared with the comment prefix. Quote and
 /// comment values are borrowed for the duration of the call.
+///
+/// [`pl_dataframe_read_csv_projected`] adds a column projection to this
+/// signature.
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_csv_ex(
     path: *const c_char,
@@ -304,6 +359,40 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_ex(
             has_header: has_header != 0,
             quote: read_csv_quote(quote)?,
             comment: read_csv_comment(comment)?,
+            columns: None,
+        };
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with delimiter, header, quote, comment, and projection
+/// controls.
+///
+/// `columns` points to `column_count` UTF-8 column names and is borrowed for
+/// the duration of the call. A null pointer or a zero count reads every
+/// column. The returned frame keeps the requested order; duplicate or unknown
+/// names are errors. This entry point is additive; the earlier reader
+/// signatures keep their defaults.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_projected(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let config = CsvReadConfig {
+            delimiter: read_delimiter(delimiter)?,
+            has_header: has_header != 0,
+            quote: read_csv_quote(quote)?,
+            comment: read_csv_comment(comment)?,
+            columns: read_csv_columns(columns, column_count)?,
         };
         read_csv_frame(&path, config)
     }));
