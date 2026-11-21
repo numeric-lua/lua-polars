@@ -1,4 +1,4 @@
-# lua-polars API — 0.9.0
+# lua-polars API — 0.10.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.9.0"`).
+Returns the bridge version (`"0.10.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -262,6 +262,11 @@ PlFrame *pl_dataframe_read_csv_projected(
     const char *path, const char *delimiter, int32_t has_header,
     const char *quote, const char *comment,
     const char *const *columns, uint64_t column_count, char **err);
+PlFrame *pl_dataframe_read_csv_typed(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -305,11 +310,19 @@ duration of the call and returns a frame containing only those columns in the
 requested order. A null array or a zero count reads every column; empty,
 duplicate, and unknown names are errors.
 
+`pl_dataframe_read_csv_typed` is the superset entry point. It borrows
+`dtype_count` `column`, `dtype` string pairs (a flat array of
+`2 * dtype_count` names) in addition to the projection. Overrides are applied
+by name after the header is known; `dtype_count` is zero for inference only.
+A null array with a non-zero count is an error. The supported dtype names match
+the Lua option, and a projection that omits an overridden column is rejected.
+The earlier reader signatures and defaults are unchanged.
+
 ## Install layouts
 
 ### LuaRocks source rock
 
-`lua-polars-0.9.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.10.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -318,13 +331,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.9.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.10.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.9.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.10.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
@@ -332,7 +345,9 @@ between `Cargo.toml`, `Cargo.lock`, `polars.lua`, the rockspec, README, API
 docs, and release notes fails before a build. It then validates the install in
 a temporary tree without forcing a cold rebuild. Set
 `POLARS_LUA_ROCK_TREE=/tmp/lua-polars-rock` to reuse a tree across repeated
-checks.
+checks; a content stamp skips `luarocks make` while the rockspec, Lua modules,
+install script, and native bridge are unchanged. Set
+`POLARS_LUA_ROCK_FORCE=1` to force a reinstall into that tree.
 
 ### Prefix install
 

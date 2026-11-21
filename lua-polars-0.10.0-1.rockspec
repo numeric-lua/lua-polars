@@ -1,9 +1,9 @@
 package = "lua-polars"
-version = "0.9.0-1"
+version = "0.10.0-1"
 
 source = {
    url = "git+https://github.com/numeric-lua/lua-polars.git",
-   tag = "v0.9.0",
+   tag = "v0.10.0",
 }
 
 description = {

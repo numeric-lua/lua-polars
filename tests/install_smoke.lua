@@ -18,8 +18,8 @@ check(source:sub(1, 1) == "@", "module source is not a file path")
 local module_path = source:sub(2)
 check(module_path:sub(1, #prefix) == prefix,
   "loaded polars from outside the installed prefix: " .. module_path)
-check(polars.version() == "0.9.0", "unexpected bridge version")
-check(polars._VERSION == "0.9.0", "unexpected Lua module version")
+check(polars.version() == "0.10.0", "unexpected bridge version")
+check(polars._VERSION == "0.10.0", "unexpected Lua module version")
 
 local df = polars.read_csv(fixture)
 local rows, cols = df:shape()
