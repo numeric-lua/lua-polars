@@ -43,17 +43,15 @@ end
 local function library_candidates()
   local root = module_root()
   local suffix = jit.os == "OSX" and ".dylib" or ".so"
-  local candidates = {
-    os.getenv("POLARS_LUA_LIB"),
+  local result = {
+    root .. "/libpolars_lua" .. suffix,
     root .. "/target/release/libpolars_lua" .. suffix,
     root .. "/target/debug/libpolars_lua" .. suffix,
     root .. "/build/libpolars_lua" .. suffix,
   }
-  local result = {}
-  for _, candidate in ipairs(candidates) do
-    if candidate and candidate ~= "" then
-      result[#result + 1] = candidate
-    end
+  local configured = os.getenv("POLARS_LUA_LIB")
+  if configured and configured ~= "" then
+    table.insert(result, 1, configured)
   end
   return result
 end
