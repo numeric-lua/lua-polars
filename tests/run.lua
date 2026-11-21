@@ -228,6 +228,75 @@ test("malformed CSV still errors with quote and comment options", function()
   truthy(tostring(err):find("fields", 1, true) or
     tostring(err):find("CSV", 1, true), "CSV parse error: " .. tostring(err))
 end)
+test("projects selected CSV columns in requested order", function()
+  local df = polars.read_csv(fixture, { columns = { "score", "name" } })
+  local rows, cols = df:shape()
+  eq(rows, 5)
+  eq(cols, 2)
+  eq(table.concat(df:columns(), ","), "score,name")
+  local table_rows = df:to_table()
+  eq(table_rows[1].score, 10)
+  eq(table_rows[1].name, "ana")
+  eq(table_rows[1].team, nil)
+  eq(table_rows[5].score, 9)
+  df:close()
+end)
+test("accepts a single projected column name", function()
+  local df = polars.read_csv(fixture, { columns = "name" })
+  eq(df:shape(), 5)
+  eq(table.concat(df:columns(), ","), "name")
+  eq(df:to_table()[5].name, "eva")
+  df:close()
+end)
+test("projection combines with headerless and delimiter options", function()
+  local df = polars.read_csv(pipe_fixture, {
+    delimiter = "|",
+    header = false,
+    columns = { "column_3", "column_1" },
+  })
+  eq(df:shape(), 3)
+  eq(table.concat(df:columns(), ","), "column_3,column_1")
+  local table_rows = df:to_table()
+  eq(table_rows[1].column_1, 1)
+  eq(table_rows[1].column_3, 10)
+  eq(table_rows[3].column_3, 30)
+  df:close()
+end)
+test("projection combines with quote and comment options", function()
+  local df = polars.read_csv(quoted_comments_fixture, {
+    delimiter = "|",
+    header = false,
+    quote = "'",
+    comment = "#",
+    columns = { "column_3", "column_2" },
+  })
+  eq(df:shape(), 2)
+  eq(table.concat(df:columns(), ","), "column_3,column_2")
+  local table_rows = df:to_table()
+  eq(table_rows[1].column_2, "ana, a")
+  eq(table_rows[2].column_3, 20)
+  df:close()
+end)
+test("projecting every column matches the full frame", function()
+  local full = polars.read_csv(fixture)
+  local projected = polars.read_csv(fixture, { columns = full:columns() })
+  eq(projected:shape(), full:shape())
+  eq(table.concat(projected:columns(), ","),
+    table.concat(full:columns(), ","))
+  eq(projected:to_table()[1].name, full:to_table()[1].name)
+  projected:close()
+  full:close()
+end)
+test("projection rejects unknown and duplicate columns", function()
+  local ok, err = pcall(polars.read_csv, fixture, { columns = { "nope" } })
+  eq(ok, false, "unknown projected column accepted")
+  truthy(tostring(err):find("nope", 1, true),
+    "unknown projected column error: " .. tostring(err))
+  ok, err = pcall(polars.read_csv, fixture, { columns = { "name", "name" } })
+  eq(ok, false, "duplicate projected column accepted")
+  truthy(tostring(err):find("duplicate", 1, true),
+    "duplicate projected column error: " .. tostring(err))
+end)
 test("select returns chosen columns in order", function()
   local df = polars.read_csv(fixture):select("name", "score")
   local rows, cols = df:shape()
@@ -669,6 +738,12 @@ test("read_csv rejects invalid options", function()
     { { comment = 35 }, "comment must be" },
     { { comment = "##" }, "comment" },
     { { comment = "\r" }, "comment" },
+    { { columns = 42 }, "columns must be" },
+    { { columns = {} }, "must not be empty" },
+    { { columns = { 1 } }, "entries must be" },
+    { { columns = { "" } }, "entries must be" },
+    { { columns = { "name", 42 } }, "entries must be" },
+    { { columns = { "name", "name" } }, "duplicate" },
     { { delimiter = "'", quote = "'" }, "quote" },
     { { delimiter = "#", comment = "#" }, "comment" },
     { { quote = "'", comment = "'" }, "quote" },
