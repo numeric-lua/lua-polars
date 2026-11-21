@@ -35,6 +35,7 @@ end
   that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and raw `to_json()`
+- `drop_nulls()` and `fill_null()` SQL-backed null handling
 - explicit `:close()` plus Lua GC finalization
 
 Not implemented yet: LazyFrame expressions, Arrow zero-copy exchange,

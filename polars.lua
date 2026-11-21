@@ -222,6 +222,33 @@ local function write_frame(self, path, method)
   return self
 end
 
+local function quote_identifier(name)
+  return '"' .. tostring(name):gsub('"', '""') .. '"'
+end
+
+function DataFrame:drop_nulls()
+  local conditions = {}
+  for _, name in ipairs(self:columns()) do
+    conditions[#conditions + 1] = quote_identifier(name) .. " IS NOT NULL"
+  end
+  return self:sql("SELECT * FROM df WHERE " .. table.concat(conditions, " AND "))
+end
+
+function DataFrame:fill_null(strategy)
+  strategy = strategy or "zero"
+  local fill = strategy == "zero" and 0 or strategy == "one" and 1 or nil
+  if fill == nil then
+    error("fill_null supports zero or one", 2)
+  end
+  local projections = {}
+  for _, name in ipairs(self:columns()) do
+    local quoted = quote_identifier(name)
+    projections[#projections + 1] = "COALESCE(" .. quoted .. ", " ..
+      tostring(fill) .. ") AS " .. quoted
+  end
+  return self:sql("SELECT " .. table.concat(projections, ", ") .. " FROM df")
+end
+
 function DataFrame:write_csv(path) return write_frame(self, path, "pl_dataframe_write_csv") end
 function DataFrame:write_parquet(path) return write_frame(self, path, "pl_dataframe_write_parquet") end
 

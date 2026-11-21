@@ -569,6 +569,20 @@ end)
 
 cleanup_temp_files()
 
+test("drop_nulls and fill_null work on CSV nulls", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local dropped = df:drop_nulls()
+  eq(select(1, dropped:shape()), 2)
+  dropped:close()
+  local filled = df:fill_null("zero")
+  local rows = filled:to_table()
+  eq(tostring(find_row(rows, { id = 3 }).note), "0")
+  filled:close(); df:close()
+  local bad = polars.read_csv(roundtrip_fixture)
+  local ok = pcall(function() bad:fill_null("nope") end)
+  eq(ok, false); bad:close()
+end)
+
 io.write(string.format("\n\n%d tests, %d passed, %d failed\n", passed + failed,
   passed, failed))
 if failed > 0 then
