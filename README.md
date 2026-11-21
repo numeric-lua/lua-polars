@@ -29,9 +29,10 @@ end
 `0.4.0` is an eager-first MVP:
 
 - CSV and Parquet readers and writers
-- schema, shape, head
+- schema, shape, head, ordered columns
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, group-by, drop, rename, and with-columns
+  that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and raw `to_json()`
 - explicit `:close()` plus Lua GC finalization
@@ -59,11 +60,29 @@ CARGO_BUILD_JOBS=1 ./scripts/build.sh
 ./scripts/build.sh        # target/release/libpolars_lua.so
 ./scripts/test.sh         # builds if needed, then runs the Lua suite
 make test
+./scripts/smoke.sh        # installs into a temporary prefix and loads it
+make smoke
 ```
 
 The test suite is dependency-free and covers CSV/Parquet parsing and writing,
 schema, projection, filtering, sorting, grouping, all eager join types, column
-operations, SQL, JSON conversion, and error paths.
+operations, SQL, JSON conversion, and error paths. The smoke test installs the
+module and bridge into a prefix and verifies that `require("polars")` finds the
+bridge without `POLARS_LUA_LIB`.
+
+## Install into a prefix
+
+There is no LuaRocks package yet. `scripts/install.sh` copies the Lua module,
+its JSON helper, and the native bridge into a self-contained prefix:
+
+```sh
+./scripts/install.sh /tmp/lua-polars
+LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
+  luajit -e 'local p = require("polars"); print(p.version())'
+```
+
+The bridge is installed beside `polars.lua`, which is the first default lookup
+location after `POLARS_LUA_LIB`.
 
 ## API
 
@@ -76,6 +95,7 @@ polars.read_parquet(path)
 
 df:shape()                -- rows, cols
 df:schema()               -- { column = "i64", ... }
+df:columns()              -- ordered column names
 df:head(n)
 df:sql(query)
 df:select("a", "b")

@@ -7,7 +7,12 @@ local polars = require("polars")
 ```
 
 The native bridge is loaded from `POLARS_LUA_LIB`, then
-`target/release/libpolars_lua.so`, `target/debug/...`, or `build/...`.
+`libpolars_lua.so` next to `polars.lua`, `target/release/...`,
+`target/debug/...`, or `build/...`.
+
+The `columns()` method, the column-order guarantee, and the install workflow
+below are on `main` for the next release; `polars.version()` remains
+`"0.4.0"`.
 
 ## Top-level
 
@@ -42,6 +47,16 @@ an error.
 
 Maps column names to Polars dtype names, e.g. `{ score = "i64" }`. The order
 of keys in the returned Lua table is not significant.
+
+### `df:columns() -> table`
+
+Returns the column names as an array in frame order.
+
+```lua
+for _, name in ipairs(df:columns()) do
+  print(name)
+end
+```
 
 ### `df:head(n) -> DataFrame`
 
@@ -97,12 +112,13 @@ strings as varargs.
 df:drop("unused", "debug")
 ```
 
-Dropping every column is an error.
+Dropping every column is an error. The remaining columns keep their frame
+order.
 
 ### `df:rename(mapping) -> DataFrame`
 
 Renames columns whose names appear as keys in `mapping`; other columns are
-kept. Values are the new column names.
+kept. Values are the new column names. Column order is preserved.
 
 ```lua
 df:rename({ score = "points" })
@@ -110,7 +126,8 @@ df:rename({ score = "points" })
 
 ### `df:with_columns(...) -> DataFrame`
 
-Appends trusted SQL expressions as new columns, keeping the existing columns.
+Appends trusted SQL expressions as new columns, keeping the existing columns
+in their original order.
 
 ```lua
 df:with_columns('"score" * 2 AS double_score')
@@ -194,6 +211,7 @@ PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
+char *pl_dataframe_columns_json(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
 PlFrame *pl_dataframe_join(
     PlFrame *left, PlFrame *right, const char *how,
@@ -213,10 +231,28 @@ Returned `char *` values and error strings must be freed with
 for the duration of the call, and returns a newly owned frame. The write
 functions return `0` on success and non-zero on error.
 
+## Install layout
+
+`scripts/install.sh PREFIX` installs `polars.lua`, `polars/json.lua`, and
+`libpolars_lua.so` into `PREFIX/share/lua/5.1/`. The bridge sits beside
+`polars.lua`, so a module loaded from that prefix finds it without
+`POLARS_LUA_LIB`:
+
+```sh
+./scripts/install.sh /tmp/lua-polars
+LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
+  luajit -e 'print(require("polars").version())'
+```
+
+`scripts/smoke.sh` performs this install into a temporary prefix and runs
+`tests/install_smoke.lua` against it. There is no LuaRocks package yet.
+
 ## Roadmap
 
 - [x] Eager inner/left/full/outer/semi/anti/cross DataFrame joins.
 - [x] CSV/Parquet writers and drop/rename/with-columns helpers.
+- [x] Ordered `columns()` and order-preserving column operations.
+- [x] Prefix install and smoke test.
 - [ ] LazyFrame/expressions.
 - [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.
 - [ ] Streaming and scan APIs.

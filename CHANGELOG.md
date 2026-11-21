@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `df:columns()` returns column names in frame order;
+- drop/rename/with_columns preserve column order, and dropping every column is
+  an explicit error;
+- dedicated CSV/Parquet writer round-trip and error-path tests;
+- writer errors are freed instead of leaked;
+- install and smoke scripts, plus a fix for the default library lookup when
+  `POLARS_LUA_LIB` is unset.
+
 ## 0.4.0
 
 - CSV and Parquet writers;
