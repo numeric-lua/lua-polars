@@ -28,4 +28,13 @@ local columns = df:columns()
 check(#columns == 4 and columns[1] == "name", "unexpected column order")
 df:close()
 
+local projected = polars.read_csv(fixture, { columns = { "score", "name" } })
+local projected_rows, projected_cols = projected:shape()
+check(projected_rows == 5 and projected_cols == 2,
+  "unexpected projected fixture shape")
+check(table.concat(projected:columns(), ",") == "score,name",
+  "unexpected projected column order")
+check(projected:to_table()[1].score == 10, "unexpected projected value")
+projected:close()
+
 io.write("install smoke: ok\n")
