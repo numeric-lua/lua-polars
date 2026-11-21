@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - `polars.read_csv(path, options)` accepts `columns` as a single column name or
   a list of names; Polars applies the projection at read time and the returned
