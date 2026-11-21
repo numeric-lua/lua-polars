@@ -1,4 +1,4 @@
-# lua-polars API — 0.6.0
+# lua-polars API — 0.7.0
 
 ## Modules
 
@@ -8,23 +8,38 @@ local polars = require("polars")
 
 The native bridge is loaded from `POLARS_LUA_LIB`, then
 `libpolars_lua.so` next to `polars.lua`, `target/release/...`,
-`target/debug/...`, or `build/...`.
-
-The `columns()` method, the column-order guarantee, and the install workflow
-below are on `main` for the next release; `polars.version()` remains
-`"0.6.0"`.
+`target/debug/...`, `build/...`, or the directories listed by
+`package.cpath` (the LuaRocks layout).
 
 ## Top-level
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.6.0"`).
+Returns the bridge version (`"0.7.0"`).
 
-### `polars.read_csv(path) -> DataFrame`
+### `polars.read_csv(path [, options]) -> DataFrame`
 
-Reads a UTF-8 CSV file with a header row. Type inference is Polars' default.
+Reads a UTF-8 CSV file. With no options it expects a header row and commas, as
+before. Type inference is Polars' default.
 
-Errors if the path is missing, unreadable, or cannot be parsed.
+`options` is an optional table:
+
+- `delimiter`: a one-byte string, default `","`. Quote, newline, carriage
+  return, and NUL bytes are rejected.
+- `header`: a boolean, default `true`. With `header = false` the first row is
+  data and Polars names the columns `column_1`, `column_2`, and so on.
+
+```lua
+local semicolons = polars.read_csv("data.csv", { delimiter = ";" })
+local headerless = polars.read_csv("data.tsv", {
+  delimiter = "\t",
+  header = false,
+})
+```
+
+Unknown option keys are errors so typos do not silently fall back to defaults.
+Errors also cover invalid option types, a missing or unreadable path, and files
+that cannot be parsed.
 
 ### `polars.read_parquet(path) -> DataFrame`
 
@@ -207,6 +222,8 @@ The exported functions are:
 ```c
 const char *pl_version(void);
 PlFrame *pl_dataframe_read_csv(const char *path, char **err);
+PlFrame *pl_dataframe_read_csv_options(
+    const char *path, const char *delimiter, int32_t has_header, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -231,7 +248,35 @@ Returned `char *` values and error strings must be freed with
 for the duration of the call, and returns a newly owned frame. The write
 functions return `0` on success and non-zero on error.
 
-## Install layout
+`pl_dataframe_read_csv_options` is additive; `pl_dataframe_read_csv` keeps the
+comma/header defaults. It borrows `path` and `delimiter` for the duration of the
+call. A null `delimiter` means `","`; `has_header` is zero for headerless input
+and non-zero for a header row. The delimiter must be exactly one byte, and
+quote, newline, carriage-return, and NUL bytes are rejected.
+
+## Install layouts
+
+### LuaRocks source rock
+
+`lua-polars-0.7.0-1.rockspec` uses a `command` build. LuaRocks calls
+`scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
+deployed under `share/lua/<version>/` and the native bridge under
+`lib/lua/<version>/`. The loader searches `package.cpath` directories for
+`libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
+
+```sh
+luarocks make lua-polars-0.7.0-1.rockspec --tree=/tmp/lua-polars-rock
+eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
+luajit -e 'print(require("polars").version())'
+```
+
+If `target/release/libpolars_lua.so` is absent, the rockspec builds it with
+`CARGO_BUILD_JOBS` defaulting to one. The `v0.7.0` source tag referenced by the
+rockspec is created with the release; before that, `luarocks make` from a
+checkout exercises the same build and install commands. `scripts/rockspec.sh`
+performs this validation in a temporary tree.
+
+### Prefix install
 
 `scripts/install.sh PREFIX` installs `polars.lua`, `polars/json.lua`, and
 `libpolars_lua.so` into `PREFIX/share/lua/5.1/`. The bridge sits beside
@@ -245,7 +290,7 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 ```
 
 `scripts/smoke.sh` performs this install into a temporary prefix and runs
-`tests/install_smoke.lua` against it. There is no LuaRocks package yet.
+`tests/install_smoke.lua` against it.
 
 ## Roadmap
 
@@ -253,7 +298,8 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV/Parquet writers and drop/rename/with-columns helpers.
 - [x] Ordered `columns()` and order-preserving column operations.
 - [x] Prefix install and smoke test.
+- [x] CSV reader delimiter and header options.
+- [x] LuaRocks source-rock packaging.
 - [ ] LazyFrame/expressions.
 - [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.
 - [ ] Streaming and scan APIs.
-- [ ] LuaRocks packaging.

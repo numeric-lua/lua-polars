@@ -13,6 +13,8 @@ typedef struct PlFrame PlFrame;
 const char *pl_version(void);
 
 PlFrame *pl_dataframe_read_csv(const char *path, char **err);
+PlFrame *pl_dataframe_read_csv_options(
+    const char *path, const char *delimiter, int32_t has_header, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -40,6 +42,24 @@ local function module_root()
   return "."
 end
 
+local function cpath_candidates(suffix)
+  local result = {}
+  local seen = {}
+  for entry in package.cpath:gmatch("[^;]+") do
+    -- An installed LuaRocks tree keeps native modules in lib/lua/<version>;
+    -- look for the bridge in the same directories C modules come from.
+    local directory = entry:match("^(.*)[/\\][^/\\]+$")
+    if directory then
+      local candidate = directory .. "/libpolars_lua" .. suffix
+      if not seen[candidate] then
+        seen[candidate] = true
+        result[#result + 1] = candidate
+      end
+    end
+  end
+  return result
+end
+
 local function library_candidates()
   local root = module_root()
   local suffix = jit.os == "OSX" and ".dylib" or ".so"
@@ -49,6 +69,9 @@ local function library_candidates()
     root .. "/target/debug/libpolars_lua" .. suffix,
     root .. "/build/libpolars_lua" .. suffix,
   }
+  for _, candidate in ipairs(cpath_candidates(suffix)) do
+    result[#result + 1] = candidate
+  end
   local configured = os.getenv("POLARS_LUA_LIB")
   if configured and configured ~= "" then
     table.insert(result, 1, configured)
@@ -477,7 +500,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.6.0",
+  _VERSION = "0.7.0",
   null = json.null,
   DataFrame = DataFrame,
 }
@@ -486,12 +509,41 @@ function polars.version()
   return ffi.string(lib.pl_version())
 end
 
-function polars.read_csv(path)
+local CSV_OPTION_KEYS = { delimiter = true, header = true }
+
+local function csv_options(options)
+  if options == nil then
+    return ",", true
+  end
+  if type(options) ~= "table" then
+    error("read_csv options must be a table", 3)
+  end
+  for key in pairs(options) do
+    if not CSV_OPTION_KEYS[key] then
+      error("read_csv options: unknown field '" .. tostring(key) .. "'", 3)
+    end
+  end
+  local delimiter = options.delimiter
+  if delimiter == nil then delimiter = "," end
+  if type(delimiter) ~= "string" then
+    error("read_csv delimiter must be a string", 3)
+  end
+  local header = options.header
+  if header == nil then header = true end
+  if type(header) ~= "boolean" then
+    error("read_csv header must be a boolean", 3)
+  end
+  return delimiter, header
+end
+
+function polars.read_csv(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_csv path must be a non-empty string", 2)
   end
+  local delimiter, header = csv_options(options)
   local err = ffi.new("char *[1]")
-  local pointer = lib.pl_dataframe_read_csv(path, err)
+  local pointer = lib.pl_dataframe_read_csv_options(path, delimiter,
+    header and 1 or 0, err)
   return new_frame(pointer, err)
 end
 

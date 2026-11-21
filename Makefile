@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 ROOT := $(CURDIR)
 
-.PHONY: build test smoke install clean
+.PHONY: build test smoke rockspec install clean
 
 PREFIX ?= /usr/local
 
@@ -17,6 +17,9 @@ test:
 
 smoke:
 	./scripts/smoke.sh
+
+rockspec:
+	./scripts/rockspec.sh
 
 clean:
 	rm -rf target .cargo

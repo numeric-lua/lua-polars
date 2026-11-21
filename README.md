@@ -26,20 +26,24 @@ end
 
 ## Status
 
-`0.6.0` is an eager-first MVP:
+`0.7.0` is an eager-first MVP:
 
 - CSV and Parquet readers and writers
+- CSV reader options: a one-byte `delimiter` and `header = false` for
+  headerless files
 - schema, shape, head, ordered columns
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, group-by, drop, rename, and with-columns
   that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and raw `to_json()`
-- `drop_nulls()` and `fill_null()` SQL-backed null handling
+- `drop_nulls()`/`fill_null()`, `unique()`/`null_count()`, and row iteration
+  helpers
 - explicit `:close()` plus Lua GC finalization
+- a LuaRocks source rockspec and a self-contained prefix install
 
-Not implemented yet: LazyFrame expressions, Arrow zero-copy exchange,
-streaming/scan APIs, and a LuaRocks package.
+Not implemented yet: LazyFrame expressions, Arrow zero-copy exchange, and
+streaming/scan APIs.
 
 ## Requirements
 
@@ -47,6 +51,8 @@ streaming/scan APIs, and a LuaRocks package.
 - Rust 1.99+ and Cargo
 - a C linker
 - Linux or macOS
+- LuaRocks 3.x for the source-rock install path (optional; the prefix install
+  only needs LuaJIT)
 
 Polars `0.55.2` is pinned. The build is large; on a 7 GB laptop use one Cargo
 job:
@@ -63,18 +69,42 @@ CARGO_BUILD_JOBS=1 ./scripts/build.sh
 make test
 ./scripts/smoke.sh        # installs into a temporary prefix and loads it
 make smoke
+./scripts/rockspec.sh     # builds through LuaRocks and loads the rock
+make rockspec
 ```
 
 The test suite is dependency-free and covers CSV/Parquet parsing and writing,
-schema, projection, filtering, sorting, grouping, all eager join types, column
-operations, SQL, JSON conversion, and error paths. The smoke test installs the
-module and bridge into a prefix and verifies that `require("polars")` finds the
-bridge without `POLARS_LUA_LIB`.
+custom CSV delimiters and headerless files, schema, projection, filtering,
+sorting, grouping, all eager join types, column operations, SQL, JSON
+conversion, and error paths. The smoke test installs the module and bridge into
+a prefix and verifies that `require("polars")` finds the bridge without
+`POLARS_LUA_LIB`. The rockspec check installs the same checkout through
+LuaRocks into a temporary tree and requires it from there.
+
+## Install with LuaRocks
+
+The repository ships a source rockspec. LuaRocks runs the Cargo build (unless a
+release library is already present), installs the Lua modules through
+`$(LUADIR)`, and places the native bridge in `$(LIBDIR)`. The Lua loader also
+searches the directories on `package.cpath`, so no `POLARS_LUA_LIB` is needed.
+
+```sh
+luarocks make lua-polars-0.7.0-1.rockspec --tree=/tmp/lua-polars-rock
+eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
+luajit -e 'print(require("polars").version())'
+```
+
+For a clean checkout the first command compiles Polars; set
+`CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec defaults to
+one job). The source URL points at the `v0.7.0` tag, which is created as part
+of the release: use `luarocks make` from a checkout before the tag exists, and
+`luarocks build lua-polars-0.7.0-1.rockspec` afterwards. Both use the same
+build and install commands.
 
 ## Install into a prefix
 
-There is no LuaRocks package yet. `scripts/install.sh` copies the Lua module,
-its JSON helper, and the native bridge into a self-contained prefix:
+`scripts/install.sh` copies the Lua module, its JSON helper, and the native
+bridge into a self-contained prefix:
 
 ```sh
 ./scripts/install.sh /tmp/lua-polars
@@ -92,6 +122,7 @@ See [`docs/api.md`](docs/api.md). In short:
 ```lua
 polars.version()
 polars.read_csv(path)
+polars.read_csv(path, { delimiter = ";", header = false })
 polars.read_parquet(path)
 
 df:shape()                -- rows, cols
@@ -125,6 +156,8 @@ LuaJIT FFI  →  extern "C" bridge (Rust)  →  polars 0.55
 ```
 
 - The bridge catches Rust panics before they cross the C ABI.
+- The bridge is discovered through `POLARS_LUA_LIB`, beside `polars.lua`, or in
+  the directories listed by `package.cpath` (the LuaRocks layout).
 - Opaque handles are owned by Lua tables with explicit close/GC cleanup.
 - `polars-ffi` 0.55 is available for a later Arrow C Data exchange; it is not
   used in this eager MVP.

@@ -36,6 +36,42 @@ unsafe fn read_path(ptr: *const c_char) -> Result<String, String> {
     read_utf8(ptr, "path")
 }
 
+const DEFAULT_CSV_DELIMITER: u8 = b',';
+
+/// Reads the optional one-byte CSV delimiter from the C ABI.
+///
+/// A null pointer keeps the Polars default. The delimiter has to fit in one
+/// byte because Polars stores it as a `u8`; quote, newline, carriage-return,
+/// and NUL bytes cannot be delimiters.
+unsafe fn read_delimiter(ptr: *const c_char) -> Result<u8, String> {
+    if ptr.is_null() {
+        return Ok(DEFAULT_CSV_DELIMITER);
+    }
+    let delimiter = read_utf8(ptr, "delimiter")?;
+    let bytes = delimiter.as_bytes();
+    if bytes.len() != 1 {
+        return Err(format!(
+            "CSV delimiter must be exactly one byte, got {} bytes",
+            bytes.len()
+        ));
+    }
+    let byte = bytes[0];
+    if matches!(byte, 0 | b'\n' | b'\r' | b'"') {
+        return Err(format!("CSV delimiter byte 0x{byte:02x} is not allowed"));
+    }
+    Ok(byte)
+}
+
+fn read_csv_frame(path: &str, delimiter: u8, has_header: bool) -> Result<DataFrame, String> {
+    CsvReadOptions::default()
+        .with_has_header(has_header)
+        .map_parse_options(|options| options.with_separator(delimiter))
+        .try_into_reader_with_file_path(Some(PathBuf::from(path)))
+        .map_err(|error| error.to_string())?
+        .finish()
+        .map_err(|error| error.to_string())
+}
+
 unsafe fn read_key_list(
     ptr: *const *const c_char,
     count: u64,
@@ -127,7 +163,7 @@ unsafe fn finish_frame(
 
 #[no_mangle]
 pub extern "C" fn pl_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.6.0\0";
+    static VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
     VERSION.as_ptr() as *const c_char
 }
 
@@ -138,12 +174,26 @@ pub unsafe extern "C" fn pl_dataframe_read_csv(
 ) -> *mut PlFrame {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
         let path = read_path(path)?;
-        CsvReadOptions::default()
-            .with_has_header(true)
-            .try_into_reader_with_file_path(Some(PathBuf::from(path)))
-            .map_err(|error| error.to_string())?
-            .finish()
-            .map_err(|error| error.to_string())
+        read_csv_frame(&path, DEFAULT_CSV_DELIMITER, true)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with an explicit delimiter and header policy.
+///
+/// `delimiter` may be null to keep the default comma. `has_header` is zero for
+/// a headerless file and non-zero to parse the first row as column names.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_options(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let delimiter = read_delimiter(delimiter)?;
+        read_csv_frame(&path, delimiter, has_header != 0)
     }));
     finish_frame(result, err)
 }

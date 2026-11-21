@@ -78,10 +78,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.6.0")
+  eq(polars.version(), "0.7.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.6.0")
+  eq(polars._VERSION, "0.7.0")
 end)
 
 current = "csv"
@@ -104,6 +104,50 @@ test("head limits rows", function()
   local df = polars.read_csv(fixture):head(2)
   local rows = df:shape()
   eq(rows, 2)
+  df:close()
+end)
+local semicolon_fixture = root .. "/tests/fixtures/semicolon.csv"
+local pipe_fixture = root .. "/tests/fixtures/pipe_no_header.csv"
+test("reads a CSV with a custom delimiter", function()
+  local df = polars.read_csv(semicolon_fixture, { delimiter = ";" })
+  eq(df:shape(), 5)
+  eq(table.concat(df:columns(), ","), "name,team,score,active")
+  local rows = df:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].score, 10)
+  eq(rows[5].team, "red")
+  df:close()
+end)
+test("reads a headerless CSV with generated column names", function()
+  local df = polars.read_csv(fixture, { header = false })
+  local rows, cols = df:shape()
+  eq(rows, 6)
+  eq(cols, 4)
+  eq(table.concat(df:columns(), ","), "column_1,column_2,column_3,column_4")
+  local table_rows = df:to_table()
+  eq(table_rows[1].column_1, "name")
+  eq(table_rows[1].column_2, "team")
+  eq(table_rows[2].column_1, "ana")
+  eq(table_rows[2].column_2, "red")
+  df:close()
+  local headed = polars.read_csv(fixture, { header = true })
+  eq(headed:shape(), 5)
+  headed:close()
+end)
+test("custom delimiter and header options combine", function()
+  local df = polars.read_csv(pipe_fixture, { delimiter = "|", header = false })
+  local rows, cols = df:shape()
+  eq(rows, 3)
+  eq(cols, 3)
+  local schema = df:schema()
+  eq(schema.column_1, "i64")
+  eq(schema.column_2, "str")
+  eq(schema.column_3, "i64")
+  local table_rows = df:to_table()
+  eq(table_rows[1].column_1, 1)
+  eq(table_rows[1].column_2, "ana")
+  eq(table_rows[1].column_3, 10)
+  eq(table_rows[3].column_2, "caio")
   df:close()
 end)
 test("select returns chosen columns in order", function()
@@ -527,6 +571,34 @@ test("missing file is an error", function()
   eq(ok, false)
   truthy(tostring(err):find("No such file") or tostring(err):find("os error"),
     "missing-file error")
+end)
+test("read_csv rejects invalid options", function()
+  local cases = {
+    { 42, "options must be a table" },
+    { { separator = ";" }, "unknown field 'separator'" },
+    { { delimiter = 59 }, "delimiter must be a string" },
+    { { header = 0 }, "header must be a boolean" },
+    { { delimiter = "" }, "delimiter" },
+    { { delimiter = ";;" }, "delimiter" },
+    { { delimiter = "\n" }, "delimiter" },
+    { { delimiter = '"' }, "delimiter" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, fixture, case[1])
+    eq(ok, false, "invalid options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+end)
+test("read_csv reports a CSV parse error", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("a,b\n1,2\n3,4,5\n")
+  file:close()
+  local ok, err = pcall(polars.read_csv, path)
+  eq(ok, false, "ragged CSV accepted")
+  truthy(tostring(err):find("fields", 1, true) or
+    tostring(err):find("CSV", 1, true), "CSV parse error: " .. tostring(err))
 end)
 test("invalid SQL is an error", function()
   local df = polars.read_csv(fixture)
