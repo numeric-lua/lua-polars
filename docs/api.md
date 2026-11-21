@@ -37,6 +37,14 @@ before. Type inference is Polars' default.
 - `columns`: a column name or a list of names to read. The resulting frame
   keeps the requested order and contains only those columns. Unknown,
   duplicate, and empty names are errors.
+- `dtypes`: a table mapping column names to dtype names, applied by name at
+  read time instead of relying on inference. Supported dtypes are `bool` /
+  `boolean`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, and `str` / `string` /
+  `utf8`; matching is case-insensitive and the `int32`, `uint32`, and
+  `float32` long forms are accepted. The table must not be empty, and every key
+  must be a read column: an override outside `columns` or absent from the file
+  is an error. Parsing failures (for example `name = "i64"` on text) are
+  reported by Polars.
 
 `quote` and `comment` must differ from each other and from `delimiter`.
 
@@ -53,12 +61,16 @@ local quoted = polars.read_csv("notes.csv", {
 local projected = polars.read_csv("data.csv", {
   columns = { "score", "name" },
 })
+local typed = polars.read_csv("data.csv", {
+  columns = { "score", "name" },
+  dtypes = { score = "f64" },
+})
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
-collisions, invalid projection names, a missing or unreadable path, and files
-that cannot be parsed.
+collisions, invalid projection names, unsupported or missing dtype overrides,
+a missing or unreadable path, and files that cannot be parsed.
 
 ### `polars.read_parquet(path) -> DataFrame`
 

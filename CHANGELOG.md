@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.10.0
+
+- `polars.read_csv(path, options)` accepts `dtypes`, a table that overrides
+  inferred dtypes by column name; supported dtypes are `bool`, `i32`, `i64`,
+  `u32`, `u64`, `f32`, `f64`, and `str`, with long aliases and
+  case-insensitive matching;
+- the additive `pl_dataframe_read_csv_typed` C ABI entry point carries both a
+  column projection and `column`/`dtype` override pairs; earlier reader entry
+  points keep their signatures and defaults;
+- overrides are validated eagerly: unsupported dtype names, empty tables,
+  non-string keys/values, an override outside the projection, a duplicate
+  override, and an override for a column absent from the file are errors;
+- tests cover dtype changes on inferred columns, string and numeric overrides,
+  aliases and integer widths, projection and headerless combinations,
+  quote/comment combinations, unknown/unprojected columns, and unparsable
+  values;
+- `scripts/rockspec.sh` records a content stamp in a reused
+  `POLARS_LUA_ROCK_TREE` and skips `luarocks make` when the rockspec, Lua
+  modules, install script, and native bridge are unchanged;
+  `POLARS_LUA_ROCK_FORCE=1` forces a reinstall;
+- the installed-tree smoke test exercises a projected dtype override;
+- 68 tests.
+
 ## 0.9.0
 
 - `polars.read_csv(path, options)` accepts `columns` as a single column name or
