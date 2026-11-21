@@ -21,10 +21,7 @@ ROCKSPEC=$1
 cd "$ROOT"
 unset POLARS_LUA_LIB
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
-if [ ! -f target/release/libpolars_lua.so ] &&
-    [ ! -f target/release/libpolars_lua.dylib ]; then
-  ./scripts/build.sh
-fi
+"$ROOT/scripts/ensure-bridge.sh"
 
 luarocks make --tree="$TREE" --deps-mode=none "$ROCKSPEC"
 eval "$(luarocks path --tree="$TREE")"

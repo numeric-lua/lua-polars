@@ -14,9 +14,7 @@ if [ -z "$PREFIX" ]; then
 fi
 
 LIB=${POLARS_LUA_LIB:-"$ROOT/target/release/libpolars_lua.$SUFFIX"}
-if [ ! -f "$LIB" ]; then
-  "$ROOT/scripts/build.sh"
-fi
+"$ROOT/scripts/ensure-bridge.sh" >/dev/null
 DEST="$PREFIX/share/lua/5.1"
 mkdir -p "$DEST/polars"
 cp "$ROOT/polars.lua" "$DEST/polars.lua"
