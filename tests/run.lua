@@ -76,6 +76,13 @@ local function cleanup_temp_files()
   temp_files = {}
 end
 
+local function read_file(path)
+  local file = assert(io.open(path, "rb"))
+  local data = file:read("*a")
+  file:close()
+  return data
+end
+
 current = "module"
 test("version is exposed", function()
   eq(polars.version(), "0.10.0")
@@ -772,6 +779,98 @@ test("Parquet writer round-trips quoted strings, nulls, and schema", function()
   check_roundtrip_frame(loaded)
   loaded:close()
   df:close()
+end)
+test("CSV writer options round-trip delimiter and null value", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  eq(df:write_csv(out, { delimiter = ";", null_value = "NA" }), df,
+    "write_csv options return value")
+  local raw = read_file(out)
+  truthy(raw:find("id;name;note\n", 1, true), "semicolon header")
+  truthy(raw:find("3;caio;NA\n", 1, true), "null placeholder")
+  local loaded = polars.read_csv(out, { delimiter = ";" })
+  eq(select(1, loaded:shape()), 3)
+  eq(select(2, loaded:shape()), 3)
+  local rows = loaded:to_table()
+  eq(find_row(rows, { id = 1 }).note, "hello, world")
+  eq(find_row(rows, { id = 2 }).note, 'say "hi"')
+  eq(find_row(rows, { id = 3 }).note, "NA")
+  loaded:close()
+  df:close()
+end)
+test("CSV writer header option writes headerless output", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  df:write_csv(out, { header = false })
+  local raw = read_file(out)
+  truthy(not raw:find("id,name,note", 1, true), "header row omitted")
+  truthy(raw:find('1,ana,"hello, world"\n', 1, true), "headerless first row")
+  local loaded = polars.read_csv(out, { header = false })
+  eq(select(1, loaded:shape()), 3)
+  eq(select(2, loaded:shape()), 3)
+  local rows = loaded:to_table()
+  eq(rows[1].column_2, "ana")
+  eq(rows[3].column_3, polars.null)
+  loaded:close()
+  df:close()
+end)
+test("CSV writer defaults stay comma, header, and empty null", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  df:write_csv(out, {})
+  local raw = read_file(out)
+  truthy(raw:find("id,name,note\n", 1, true), "comma header")
+  truthy(raw:find("3,caio,\n", 1, true), "empty null field")
+  df:close()
+end)
+test("CSV writer rejects invalid options", function()
+  local df = polars.read_csv(fixture)
+  local path = new_temp_path(".csv")
+  local cases = {
+    { 42, "options must be a table" },
+    { { separator = ";" }, "unknown field 'separator'" },
+    { { delimiter = 59 }, "delimiter must be a one-byte string" },
+    { { delimiter = "" }, "delimiter" },
+    { { delimiter = ";;" }, "delimiter" },
+    { { delimiter = "\n" }, "delimiter" },
+    { { delimiter = '"' }, "delimiter" },
+    { { header = 0 }, "header must be a boolean" },
+    { { null_value = 1 }, "null_value must be a string" },
+    { { null_value = "a\nb" }, "null_value" },
+    { { null_value = "a\0b" }, "null_value" },
+    { { delimiter = ";", null_value = "a;b" }, "null_value" },
+    { { null_value = '"' }, "null_value" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function()
+      df:write_csv(path, case[1])
+    end)
+    eq(ok, false, "invalid write_csv options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+end)
+test("CSV writer options report invalid paths, closed frames, and IO errors", function()
+  local df = polars.read_csv(fixture)
+  local ok, err = pcall(function()
+    df:write_csv("", { delimiter = ";" })
+  end)
+  eq(ok, false, "empty options path accepted")
+  truthy(tostring(err):find("path must be a string"), "options path error")
+  local base = temp_path()
+  ok, err = pcall(function()
+    df:write_csv(base .. "/missing/out.csv", { header = false })
+  end)
+  eq(ok, false, "missing directory accepted")
+  truthy(tostring(err):find("No such file") or tostring(err):find("os error"),
+    "options filesystem error")
+  df:close()
+  ok, err = pcall(function()
+    df:write_csv(new_temp_path(".csv"), { delimiter = ";" })
+  end)
+  eq(ok, false, "closed frame with options accepted")
+  truthy(tostring(err):find("closed"), "options closed-frame error")
 end)
 test("writers reject empty and non-string paths", function()
   local df = polars.read_csv(fixture)

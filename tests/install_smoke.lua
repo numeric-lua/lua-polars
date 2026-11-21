@@ -47,4 +47,26 @@ check(table.concat(typed:columns(), ",") == "score,name",
 check(typed:to_table()[1].score == 10, "unexpected typed value")
 typed:close()
 
+local roundtrip_fixture = fixture:gsub("sample%.csv$", "roundtrip.csv")
+local written = os.tmpname()
+os.remove(written)
+local writer = polars.read_csv(roundtrip_fixture)
+writer:write_csv(written, {
+  delimiter = ";",
+  header = false,
+  null_value = "NA",
+})
+local handle = assert(io.open(written, "rb"))
+local raw = handle:read("*a")
+handle:close()
+check(raw:find("1;ana;", 1, true) ~= nil, "headerless writer output mismatch")
+check(raw:find("3;caio;NA\n", 1, true) ~= nil, "null placeholder mismatch")
+local reloaded = polars.read_csv(written, { delimiter = ";", header = false })
+check(select(1, reloaded:shape()) == 3, "unexpected writer round-trip rows")
+check(reloaded:to_table()[3].column_3 == polars.null,
+  "null placeholder did not read back as null")
+reloaded:close()
+writer:close()
+os.remove(written)
+
 io.write("install smoke: ok\n")
