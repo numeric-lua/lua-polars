@@ -1,4 +1,4 @@
-# lua-polars API — 0.10.0
+# lua-polars API — 0.11.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.10.0"`).
+Returns the bridge version (`"0.11.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -354,7 +354,7 @@ the call.
 
 ### LuaRocks source rock
 
-`lua-polars-0.10.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.11.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -363,13 +363,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.10.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.11.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.10.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.11.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch

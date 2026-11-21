@@ -1,16 +1,17 @@
 package = "lua-polars"
-version = "0.10.0-1"
+version = "0.11.0-1"
 
 source = {
    url = "git+https://github.com/numeric-lua/lua-polars.git",
-   tag = "v0.10.0",
+   tag = "v0.11.0",
 }
 
 description = {
    summary = "LuaJIT DataFrame bindings over Rust Polars",
    detailed = [[
 Eager DataFrames over Polars: CSV/Parquet readers and writers with CSV
-delimiter/header/quote/comment/columns options, SQL, select, filter, sort,
+delimiter/header/quote/comment/columns/dtypes reader options and
+delimiter/header/null-value writer options, SQL, select, filter, sort,
 group-by, joins, ordered columns, null helpers, and JSON/table conversion.
 Requires LuaJIT and a Rust toolchain at build time.
 ]],
