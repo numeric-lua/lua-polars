@@ -1,7 +1,13 @@
 SHELL := /bin/sh
 ROOT := $(CURDIR)
 
-.PHONY: build test smoke clean
+.PHONY: build test smoke install clean
+
+PREFIX ?= /usr/local
+
+install:
+	@if [ ! -f target/release/libpolars_lua.so ] && [ ! -f target/release/libpolars_lua.dylib ]; then $(MAKE) build; fi
+	./scripts/install.sh $(PREFIX)
 
 build:
 	./scripts/build.sh

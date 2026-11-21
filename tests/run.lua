@@ -78,10 +78,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.5.0")
+  eq(polars.version(), "0.6.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.5.0")
+  eq(polars._VERSION, "0.6.0")
 end)
 
 current = "csv"

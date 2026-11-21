@@ -1,6 +1,5 @@
-# lua-polars 0.5.0
+# lua-polars 0.6.0
 
-- ordered `df:columns()` and stable column order;
-- writer round-trip and failure-path tests;
-- prefix install/smoke workflow and default library discovery fix;
+- LuaRocks source rockspec and `make install` flow;
+- install smoke covers the LuaRocks/prefix layout;
 - 42 tests.
