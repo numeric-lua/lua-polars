@@ -34,6 +34,9 @@ before. Type inference is Polars' default.
 - `comment`: a one-byte line prefix, default disabled. Lines whose first byte
   matches are ignored, including comment lines before the header. Set it to
   `false` or `""` to disable comment skipping.
+- `columns`: a column name or a list of names to read. The resulting frame
+  keeps the requested order and contains only those columns. Unknown,
+  duplicate, and empty names are errors.
 
 `quote` and `comment` must differ from each other and from `delimiter`.
 
@@ -47,11 +50,15 @@ local quoted = polars.read_csv("notes.csv", {
   quote = "'",
   comment = "#",
 })
+local projected = polars.read_csv("data.csv", {
+  columns = { "score", "name" },
+})
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
-collisions, a missing or unreadable path, and files that cannot be parsed.
+collisions, invalid projection names, a missing or unreadable path, and files
+that cannot be parsed.
 
 ### `polars.read_parquet(path) -> DataFrame`
 
@@ -239,6 +246,10 @@ PlFrame *pl_dataframe_read_csv_options(
 PlFrame *pl_dataframe_read_csv_ex(
     const char *path, const char *delimiter, int32_t has_header,
     const char *quote, const char *comment, char **err);
+PlFrame *pl_dataframe_read_csv_projected(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -276,6 +287,12 @@ empty `quote` disables quote parsing. A null or empty `comment` disables
 comment lines. Quote and comment values are one byte and may not equal the
 delimiter or each other; NUL, newline, and carriage-return bytes are rejected.
 
+`pl_dataframe_read_csv_projected` is additive and keeps the earlier reader
+signatures and defaults. It borrows `column_count` UTF-8 column names for the
+duration of the call and returns a frame containing only those columns in the
+requested order. A null array or a zero count reads every column; empty,
+duplicate, and unknown names are errors.
+
 ## Install layouts
 
 ### LuaRocks source rock
@@ -298,8 +315,12 @@ If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
 the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.8.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
-`scripts/rockspec.sh` performs this validation in a temporary tree without
-forcing a cold rebuild.
+`scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
+between `Cargo.toml`, `Cargo.lock`, `polars.lua`, the rockspec, README, API
+docs, and release notes fails before a build. It then validates the install in
+a temporary tree without forcing a cold rebuild. Set
+`POLARS_LUA_ROCK_TREE=/tmp/lua-polars-rock` to reuse a tree across repeated
+checks.
 
 ### Prefix install
 
@@ -325,6 +346,7 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] Prefix install and smoke test.
 - [x] CSV reader delimiter and header options.
 - [x] CSV reader quote and comment options.
+- [x] CSV reader column projection.
 - [x] LuaRocks source-rock packaging.
 - [ ] LazyFrame/expressions.
 - [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.

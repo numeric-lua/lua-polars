@@ -31,7 +31,8 @@ end
 - CSV and Parquet readers and writers
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
   files, a one-byte `quote` character (or `false` to disable quote parsing),
-  and a one-byte `comment` prefix (or `false` to disable comment skipping)
+  a one-byte `comment` prefix (or `false` to disable comment skipping), and a
+  `columns` name/list projection returned in the requested order
 - schema, shape, head, ordered columns
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, group-by, drop, rename, and with-columns
@@ -81,11 +82,14 @@ check does not restart the Polars build.
 
 The test suite is dependency-free and covers CSV/Parquet parsing and writing,
 custom CSV delimiters, quote characters, comment prefixes, headerless files,
-schema, projection, filtering, sorting, grouping, all eager join types, column
-operations, SQL, JSON conversion, and error paths. The smoke test installs the
-module and bridge into a prefix and verifies that `require("polars")` finds the
-bridge without `POLARS_LUA_LIB`. The rockspec check installs the same checkout
-through LuaRocks into a temporary tree and requires it from there.
+read-time column projection, schema, projection, filtering, sorting, grouping,
+all eager join types, column operations, SQL, JSON conversion, and error paths.
+The smoke test installs the module and bridge into a prefix and verifies that
+`require("polars")` finds the bridge without `POLARS_LUA_LIB`. The rockspec
+check validates the release version references, installs the same checkout
+through LuaRocks into a temporary tree, and requires it from there. Set
+`POLARS_LUA_ROCK_TREE=/path` to reuse a tree across repeated checks; the native
+bridge itself is reused whenever it is newer than the Rust sources.
 
 ## Install with LuaRocks
 
@@ -136,6 +140,7 @@ polars.read_csv(path, {
   header = false,
   quote = "'",
   comment = "#",
+  columns = { "name", "score" },
 })
 polars.read_parquet(path)
 

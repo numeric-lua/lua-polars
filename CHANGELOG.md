@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- `polars.read_csv(path, options)` accepts `columns` as a single column name or
+  a list of names; Polars applies the projection at read time and the returned
+  frame keeps the requested order;
+- the additive `pl_dataframe_read_csv_projected` C ABI entry point carries the
+  projection; `pl_dataframe_read_csv`, `pl_dataframe_read_csv_options`, and
+  `pl_dataframe_read_csv_ex` keep their signatures and defaults;
+- projection validation rejects empty lists, non-string or empty entries,
+  duplicate names, and unknown columns;
+- tests cover projection order, single-column selection, headerless and
+  quote/comment combinations, projecting every column, and the error paths;
+- `scripts/check-version.sh` cross-checks `Cargo.toml`, `Cargo.lock`,
+  `polars.lua`, the rockspec name/version/tag, README, API docs, and release
+  notes; `scripts/rockspec.sh` runs it before installing and honors
+  `POLARS_LUA_ROCK_TREE` for repeatable incremental validation;
+- the installed-tree smoke test exercises a projected read;
+- 62 tests.
+
 ## 0.8.0
 
 - `polars.read_csv(path, options)` accepts a one-byte `quote` character and a
