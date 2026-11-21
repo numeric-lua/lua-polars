@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.0
+
+- `polars.read_csv(path, options)` accepts a one-byte `quote` character and a
+  one-byte `comment` prefix; `quote = false`/`quote = ""` disables quote
+  parsing and `comment = false`/`comment = ""` disables comment skipping;
+- the additive `pl_dataframe_read_csv_ex` C ABI entry point carries the quote
+  and comment controls; `pl_dataframe_read_csv` and
+  `pl_dataframe_read_csv_options` keep their signatures and defaults;
+- option validation rejects multi-byte and control-byte quote/comment values,
+  and rejects a quote or comment byte that collides with the delimiter or with
+  each other;
+- tests cover single-quote escaping, disabled quote parsing, comment lines
+  before the header and between rows, combined delimiter/header/quote/comment
+  options, invalid option values, and malformed CSV under the new options;
+- `scripts/ensure-bridge.sh` reuses a release bridge newer than the Rust inputs
+  and rebuilds only missing or stale bridges; `test.sh`, `rockspec.sh`,
+  `install.sh`, and the rockspec build command share it, so LuaRocks
+  validation is incremental instead of triggering repeated cold builds;
+- `scripts/build.sh` now defaults to one Cargo job;
+- 56 tests.
+
 ## 0.7.0
 
 - `polars.read_csv(path, options)` accepts a one-byte `delimiter` and a

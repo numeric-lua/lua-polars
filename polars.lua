@@ -15,6 +15,9 @@ const char *pl_version(void);
 PlFrame *pl_dataframe_read_csv(const char *path, char **err);
 PlFrame *pl_dataframe_read_csv_options(
     const char *path, const char *delimiter, int32_t has_header, char **err);
+PlFrame *pl_dataframe_read_csv_ex(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -500,7 +503,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.7.0",
+  _VERSION = "0.8.0",
   null = json.null,
   DataFrame = DataFrame,
 }
@@ -509,11 +512,40 @@ function polars.version()
   return ffi.string(lib.pl_version())
 end
 
-local CSV_OPTION_KEYS = { delimiter = true, header = true }
+local CSV_OPTION_KEYS = {
+  delimiter = true,
+  header = true,
+  quote = true,
+  comment = true,
+}
+
+local function csv_byte_option(options, key, default)
+  local value = options[key]
+  if value == nil then
+    return default
+  end
+  if value == false then
+    return ""
+  end
+  if type(value) ~= "string" then
+    error("read_csv " .. key ..
+      " must be a one-byte string or false", 3)
+  end
+  if value == "" then
+    return ""
+  end
+  if #value ~= 1 then
+    error("read_csv " .. key .. " must be exactly one byte", 3)
+  end
+  if value == "\n" or value == "\r" or value == "\0" then
+    error("read_csv " .. key .. " byte is not allowed", 3)
+  end
+  return value
+end
 
 local function csv_options(options)
   if options == nil then
-    return ",", true
+    return ",", true, '"', ""
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -533,17 +565,19 @@ local function csv_options(options)
   if type(header) ~= "boolean" then
     error("read_csv header must be a boolean", 3)
   end
-  return delimiter, header
+  local quote = csv_byte_option(options, "quote", '"')
+  local comment = csv_byte_option(options, "comment", "")
+  return delimiter, header, quote, comment
 end
 
 function polars.read_csv(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_csv path must be a non-empty string", 2)
   end
-  local delimiter, header = csv_options(options)
+  local delimiter, header, quote, comment = csv_options(options)
   local err = ffi.new("char *[1]")
-  local pointer = lib.pl_dataframe_read_csv_options(path, delimiter,
-    header and 1 or 0, err)
+  local pointer = lib.pl_dataframe_read_csv_ex(path, delimiter,
+    header and 1 or 0, quote, comment, err)
   return new_frame(pointer, err)
 end
 

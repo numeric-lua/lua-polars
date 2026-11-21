@@ -26,11 +26,12 @@ end
 
 ## Status
 
-`0.7.0` is an eager-first MVP:
+`0.8.0` is an eager-first MVP:
 
 - CSV and Parquet readers and writers
-- CSV reader options: a one-byte `delimiter` and `header = false` for
-  headerless files
+- CSV reader options: one-byte `delimiter`, `header = false` for headerless
+  files, a one-byte `quote` character (or `false` to disable quote parsing),
+  and a one-byte `comment` prefix (or `false` to disable comment skipping)
 - schema, shape, head, ordered columns
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, group-by, drop, rename, and with-columns
@@ -65,40 +66,48 @@ CARGO_BUILD_JOBS=1 ./scripts/build.sh
 
 ```sh
 ./scripts/build.sh        # target/release/libpolars_lua.so
-./scripts/test.sh         # builds if needed, then runs the Lua suite
+./scripts/test.sh         # reuses/rebuilds the bridge, then runs the suite
 make test
 ./scripts/smoke.sh        # installs into a temporary prefix and loads it
 make smoke
-./scripts/rockspec.sh     # builds through LuaRocks and loads the rock
+./scripts/rockspec.sh     # installs through LuaRocks and loads the rock
 make rockspec
 ```
 
+`scripts/ensure-bridge.sh` is shared by the test, prefix-install, and rockspec
+checks. It reuses `target/release/libpolars_lua.so` when it is newer than the
+Rust inputs and otherwise runs Cargo incrementally, so repeating an install
+check does not restart the Polars build.
+
 The test suite is dependency-free and covers CSV/Parquet parsing and writing,
-custom CSV delimiters and headerless files, schema, projection, filtering,
-sorting, grouping, all eager join types, column operations, SQL, JSON
-conversion, and error paths. The smoke test installs the module and bridge into
-a prefix and verifies that `require("polars")` finds the bridge without
-`POLARS_LUA_LIB`. The rockspec check installs the same checkout through
-LuaRocks into a temporary tree and requires it from there.
+custom CSV delimiters, quote characters, comment prefixes, headerless files,
+schema, projection, filtering, sorting, grouping, all eager join types, column
+operations, SQL, JSON conversion, and error paths. The smoke test installs the
+module and bridge into a prefix and verifies that `require("polars")` finds the
+bridge without `POLARS_LUA_LIB`. The rockspec check installs the same checkout
+through LuaRocks into a temporary tree and requires it from there.
 
 ## Install with LuaRocks
 
-The repository ships a source rockspec. LuaRocks runs the Cargo build (unless a
-release library is already present), installs the Lua modules through
-`$(LUADIR)`, and places the native bridge in `$(LIBDIR)`. The Lua loader also
-searches the directories on `package.cpath`, so no `POLARS_LUA_LIB` is needed.
+The repository ships a source rockspec. LuaRocks runs
+`scripts/ensure-bridge.sh`, installs the Lua modules through `$(LUADIR)`, and
+places the native bridge in `$(LIBDIR)`. A release library that is newer than
+the Rust sources is reused; otherwise the bridge is built incrementally. The
+Lua loader also searches the directories on `package.cpath`, so no
+`POLARS_LUA_LIB` is needed.
 
 ```sh
-luarocks make lua-polars-0.7.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.8.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 For a clean checkout the first command compiles Polars; set
-`CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec defaults to
-one job). The source URL points at the `v0.7.0` tag, which is created as part
-of the release: use `luarocks make` from a checkout before the tag exists, and
-`luarocks build lua-polars-0.7.0-1.rockspec` afterwards. Both use the same
+`CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec and
+`scripts/build.sh` default to one job). The source URL points at the `v0.8.0`
+tag, which is created as part of the release: use `luarocks make` from a
+checkout before the tag exists, and
+`luarocks build lua-polars-0.8.0-1.rockspec` afterwards. Both use the same
 build and install commands.
 
 ## Install into a prefix
@@ -122,7 +131,12 @@ See [`docs/api.md`](docs/api.md). In short:
 ```lua
 polars.version()
 polars.read_csv(path)
-polars.read_csv(path, { delimiter = ";", header = false })
+polars.read_csv(path, {
+  delimiter = ";",
+  header = false,
+  quote = "'",
+  comment = "#",
+})
 polars.read_parquet(path)
 
 df:shape()                -- rows, cols

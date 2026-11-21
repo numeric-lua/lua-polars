@@ -1,4 +1,4 @@
-# lua-polars API — 0.7.0
+# lua-polars API — 0.8.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.7.0"`).
+Returns the bridge version (`"0.8.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -28,6 +28,14 @@ before. Type inference is Polars' default.
   return, and NUL bytes are rejected.
 - `header`: a boolean, default `true`. With `header = false` the first row is
   data and Polars names the columns `column_1`, `column_2`, and so on.
+- `quote`: a one-byte string used to quote fields, default `"`. Set it to
+  `false` or `""` to disable quote parsing. NUL, newline, and carriage-return
+  bytes are rejected.
+- `comment`: a one-byte line prefix, default disabled. Lines whose first byte
+  matches are ignored, including comment lines before the header. Set it to
+  `false` or `""` to disable comment skipping.
+
+`quote` and `comment` must differ from each other and from `delimiter`.
 
 ```lua
 local semicolons = polars.read_csv("data.csv", { delimiter = ";" })
@@ -35,11 +43,15 @@ local headerless = polars.read_csv("data.tsv", {
   delimiter = "\t",
   header = false,
 })
+local quoted = polars.read_csv("notes.csv", {
+  quote = "'",
+  comment = "#",
+})
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
-Errors also cover invalid option types, a missing or unreadable path, and files
-that cannot be parsed.
+Errors also cover invalid option types, invalid one-byte values, option
+collisions, a missing or unreadable path, and files that cannot be parsed.
 
 ### `polars.read_parquet(path) -> DataFrame`
 
@@ -224,6 +236,9 @@ const char *pl_version(void);
 PlFrame *pl_dataframe_read_csv(const char *path, char **err);
 PlFrame *pl_dataframe_read_csv_options(
     const char *path, const char *delimiter, int32_t has_header, char **err);
+PlFrame *pl_dataframe_read_csv_ex(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -248,33 +263,43 @@ Returned `char *` values and error strings must be freed with
 for the duration of the call, and returns a newly owned frame. The write
 functions return `0` on success and non-zero on error.
 
-`pl_dataframe_read_csv_options` is additive; `pl_dataframe_read_csv` keeps the
-comma/header defaults. It borrows `path` and `delimiter` for the duration of the
-call. A null `delimiter` means `","`; `has_header` is zero for headerless input
-and non-zero for a header row. The delimiter must be exactly one byte, and
-quote, newline, carriage-return, and NUL bytes are rejected.
+`pl_dataframe_read_csv_ex` is additive; the existing
+`pl_dataframe_read_csv` and `pl_dataframe_read_csv_options` keep their
+signatures and defaults. Both option entry points borrow their string
+arguments for the duration of the call. A null `delimiter` means `","`;
+`has_header` is zero for headerless input and non-zero for a header row. The
+delimiter must be exactly one byte, and quote, newline, carriage-return, and
+NUL bytes are rejected.
+
+For `pl_dataframe_read_csv_ex`, a null `quote` keeps the `"` default while an
+empty `quote` disables quote parsing. A null or empty `comment` disables
+comment lines. Quote and comment values are one byte and may not equal the
+delimiter or each other; NUL, newline, and carriage-return bytes are rejected.
 
 ## Install layouts
 
 ### LuaRocks source rock
 
-`lua-polars-0.7.0-1.rockspec` uses a `command` build. LuaRocks calls
+`lua-polars-0.8.0-1.rockspec` uses a `command` build. Its build command runs
+`scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
+inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
 deployed under `share/lua/<version>/` and the native bridge under
 `lib/lua/<version>/`. The loader searches `package.cpath` directories for
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.7.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.8.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
-If `target/release/libpolars_lua.so` is absent, the rockspec builds it with
-`CARGO_BUILD_JOBS` defaulting to one. The `v0.7.0` source tag referenced by the
-rockspec is created with the release; before that, `luarocks make` from a
-checkout exercises the same build and install commands. `scripts/rockspec.sh`
-performs this validation in a temporary tree.
+If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.8.0`
+source tag referenced by the rockspec is created with the release; before that,
+`luarocks make` from a checkout exercises the same build and install commands.
+`scripts/rockspec.sh` performs this validation in a temporary tree without
+forcing a cold rebuild.
 
 ### Prefix install
 
@@ -299,6 +324,7 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] Ordered `columns()` and order-preserving column operations.
 - [x] Prefix install and smoke test.
 - [x] CSV reader delimiter and header options.
+- [x] CSV reader quote and comment options.
 - [x] LuaRocks source-rock packaging.
 - [ ] LazyFrame/expressions.
 - [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.

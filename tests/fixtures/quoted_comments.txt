@@ -1,0 +1,4 @@
+# headerless pipe fixture
+1|'ana, a'|10
+# another comment
+2|'bia'|20

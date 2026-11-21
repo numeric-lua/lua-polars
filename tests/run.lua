@@ -78,10 +78,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.7.0")
+  eq(polars.version(), "0.8.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.7.0")
+  eq(polars._VERSION, "0.8.0")
 end)
 
 current = "csv"
@@ -149,6 +149,84 @@ test("custom delimiter and header options combine", function()
   eq(table_rows[1].column_3, 10)
   eq(table_rows[3].column_2, "caio")
   df:close()
+end)
+local single_quote_fixture = root .. "/tests/fixtures/single_quote.csv"
+local commented_fixture = root .. "/tests/fixtures/commented.csv"
+local quoted_literal_fixture = root .. "/tests/fixtures/quoted_literal.csv"
+local quoted_comments_fixture = root .. "/tests/fixtures/quoted_comments.txt"
+local comment_rows_fixture = root .. "/tests/fixtures/comment_rows.csv"
+local ragged_quoted_fixture = root .. "/tests/fixtures/ragged_quoted.csv"
+
+test("reads a CSV with a custom quote character", function()
+  local df = polars.read_csv(single_quote_fixture, { quote = "'" })
+  local rows, cols = df:shape()
+  eq(rows, 3)
+  eq(cols, 3)
+  local table_rows = df:to_table()
+  eq(table_rows[1].note, "hello, world")
+  eq(table_rows[2].note, "say 'hi'")
+  eq(table_rows[3].note, polars.null)
+  eq(table_rows[2].score, 20)
+  df:close()
+end)
+test("disables quote parsing with quote = false", function()
+  local quoted = polars.read_csv(quoted_literal_fixture)
+  eq(quoted:to_table()[1].note, "hello")
+  quoted:close()
+  local literal = polars.read_csv(quoted_literal_fixture, { quote = false })
+  local table_rows = literal:to_table()
+  eq(table_rows[1].note, '"hello"')
+  eq(table_rows[2].note, '"hi"')
+  literal:close()
+end)
+test("skips comment lines with a custom comment prefix", function()
+  local df = polars.read_csv(commented_fixture, { comment = "#" })
+  local rows, cols = df:shape()
+  eq(rows, 2)
+  eq(cols, 3)
+  eq(table.concat(df:columns(), ","), "name,team,score")
+  local table_rows = df:to_table()
+  eq(table_rows[1].name, "ana")
+  eq(table_rows[2].team, "blue")
+  df:close()
+end)
+test("combines quote, comment, delimiter, and header options", function()
+  local df = polars.read_csv(quoted_comments_fixture, {
+    delimiter = "|",
+    header = false,
+    quote = "'",
+    comment = "#",
+  })
+  local rows, cols = df:shape()
+  eq(rows, 2)
+  eq(cols, 3)
+  eq(table.concat(df:columns(), ","), "column_1,column_2,column_3")
+  local table_rows = df:to_table()
+  eq(table_rows[1].column_2, "ana, a")
+  eq(table_rows[2].column_2, "bia")
+  eq(table_rows[2].column_3, 20)
+  df:close()
+end)
+test("comment = false keeps comment-looking rows as data", function()
+  local data = polars.read_csv(comment_rows_fixture, { comment = false })
+  local rows, cols = data:shape()
+  eq(rows, 2)
+  eq(cols, 3)
+  eq(data:to_table()[1].name, "#skip")
+  data:close()
+  local skipped = polars.read_csv(comment_rows_fixture, { comment = "#" })
+  eq(skipped:shape(), 1)
+  eq(skipped:to_table()[1].name, "ana")
+  skipped:close()
+end)
+test("malformed CSV still errors with quote and comment options", function()
+  local ok, err = pcall(polars.read_csv, ragged_quoted_fixture, {
+    quote = "'",
+    comment = "#",
+  })
+  eq(ok, false, "ragged CSV with options accepted")
+  truthy(tostring(err):find("fields", 1, true) or
+    tostring(err):find("CSV", 1, true), "CSV parse error: " .. tostring(err))
 end)
 test("select returns chosen columns in order", function()
   local df = polars.read_csv(fixture):select("name", "score")
@@ -582,6 +660,18 @@ test("read_csv rejects invalid options", function()
     { { delimiter = ";;" }, "delimiter" },
     { { delimiter = "\n" }, "delimiter" },
     { { delimiter = '"' }, "delimiter" },
+    { { quote = 39 }, "quote must be" },
+    { { quote = true }, "quote must be" },
+    { { quote = "''" }, "quote" },
+    { { quote = "\n" }, "quote" },
+    { { quote = "\r" }, "quote" },
+    { { quote = "\0" }, "quote" },
+    { { comment = 35 }, "comment must be" },
+    { { comment = "##" }, "comment" },
+    { { comment = "\r" }, "comment" },
+    { { delimiter = "'", quote = "'" }, "quote" },
+    { { delimiter = "#", comment = "#" }, "comment" },
+    { { quote = "'", comment = "'" }, "quote" },
   }
   for _, case in ipairs(cases) do
     local ok, err = pcall(polars.read_csv, fixture, case[1])

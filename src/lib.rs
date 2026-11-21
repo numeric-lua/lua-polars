@@ -37,6 +37,26 @@ unsafe fn read_path(ptr: *const c_char) -> Result<String, String> {
 }
 
 const DEFAULT_CSV_DELIMITER: u8 = b',';
+const DEFAULT_CSV_QUOTE: u8 = b'"';
+
+#[derive(Clone, Copy)]
+struct CsvReadConfig {
+    delimiter: u8,
+    has_header: bool,
+    quote: Option<u8>,
+    comment: Option<u8>,
+}
+
+impl Default for CsvReadConfig {
+    fn default() -> Self {
+        Self {
+            delimiter: DEFAULT_CSV_DELIMITER,
+            has_header: true,
+            quote: Some(DEFAULT_CSV_QUOTE),
+            comment: None,
+        }
+    }
+}
 
 /// Reads the optional one-byte CSV delimiter from the C ABI.
 ///
@@ -62,10 +82,67 @@ unsafe fn read_delimiter(ptr: *const c_char) -> Result<u8, String> {
     Ok(byte)
 }
 
-fn read_csv_frame(path: &str, delimiter: u8, has_header: bool) -> Result<DataFrame, String> {
+/// Reads an optional one-byte CSV setting from the C ABI.
+///
+/// A null pointer or an empty string disables the setting. As with the
+/// delimiter, the value has to fit in one byte; NUL, newline, and
+/// carriage-return bytes are rejected.
+unsafe fn read_optional_byte(ptr: *const c_char, label: &str) -> Result<Option<u8>, String> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    let text = read_utf8(ptr, label)?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() != 1 {
+        return Err(format!(
+            "CSV {label} must be exactly one byte, got {} bytes",
+            bytes.len()
+        ));
+    }
+    let byte = bytes[0];
+    if matches!(byte, 0 | b'\n' | b'\r') {
+        return Err(format!("CSV {label} byte 0x{byte:02x} is not allowed"));
+    }
+    Ok(Some(byte))
+}
+
+unsafe fn read_csv_quote(ptr: *const c_char) -> Result<Option<u8>, String> {
+    if ptr.is_null() {
+        return Ok(Some(DEFAULT_CSV_QUOTE));
+    }
+    read_optional_byte(ptr, "quote")
+}
+
+unsafe fn read_csv_comment(ptr: *const c_char) -> Result<Option<u8>, String> {
+    read_optional_byte(ptr, "comment")
+}
+
+fn validate_csv_config(config: &CsvReadConfig) -> Result<(), String> {
+    if config.quote == Some(config.delimiter) {
+        return Err("CSV quote character must differ from the delimiter".to_string());
+    }
+    if config.comment == Some(config.delimiter) {
+        return Err("CSV comment prefix must differ from the delimiter".to_string());
+    }
+    if config.quote.is_some() && config.quote == config.comment {
+        return Err("CSV quote character and comment prefix must differ".to_string());
+    }
+    Ok(())
+}
+
+fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String> {
+    validate_csv_config(&config)?;
     CsvReadOptions::default()
-        .with_has_header(has_header)
-        .map_parse_options(|options| options.with_separator(delimiter))
+        .with_has_header(config.has_header)
+        .map_parse_options(|options| {
+            options
+                .with_separator(config.delimiter)
+                .with_quote_char(config.quote)
+                .with_comment_prefix(config.comment.map(CommentPrefix::Single))
+        })
         .try_into_reader_with_file_path(Some(PathBuf::from(path)))
         .map_err(|error| error.to_string())?
         .finish()
@@ -174,7 +251,7 @@ pub unsafe extern "C" fn pl_dataframe_read_csv(
 ) -> *mut PlFrame {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
         let path = read_path(path)?;
-        read_csv_frame(&path, DEFAULT_CSV_DELIMITER, true)
+        read_csv_frame(&path, CsvReadConfig::default())
     }));
     finish_frame(result, err)
 }
@@ -183,6 +260,9 @@ pub unsafe extern "C" fn pl_dataframe_read_csv(
 ///
 /// `delimiter` may be null to keep the default comma. `has_header` is zero for
 /// a headerless file and non-zero to parse the first row as column names.
+///
+/// This entry point is kept for ABI compatibility; new callers can use
+/// [`pl_dataframe_read_csv_ex`] for quote and comment control.
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_csv_options(
     path: *const c_char,
@@ -192,8 +272,40 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_options(
 ) -> *mut PlFrame {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
         let path = read_path(path)?;
-        let delimiter = read_delimiter(delimiter)?;
-        read_csv_frame(&path, delimiter, has_header != 0)
+        let config = CsvReadConfig {
+            delimiter: read_delimiter(delimiter)?,
+            has_header: has_header != 0,
+            ..CsvReadConfig::default()
+        };
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with delimiter, header, quote, and comment controls.
+///
+/// A null `quote` keeps the `"` default; an empty `quote` disables quote
+/// parsing. A null or empty `comment` disables comment lines; otherwise the
+/// first byte of each line is compared with the comment prefix. Quote and
+/// comment values are borrowed for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_ex(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let config = CsvReadConfig {
+            delimiter: read_delimiter(delimiter)?,
+            has_header: has_header != 0,
+            quote: read_csv_quote(quote)?,
+            comment: read_csv_comment(comment)?,
+        };
+        read_csv_frame(&path, config)
     }));
     finish_frame(result, err)
 }

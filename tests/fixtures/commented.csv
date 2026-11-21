@@ -1,0 +1,6 @@
+# fixture generated for comment tests
+name,team,score
+# skip this comment row
+ana,red,10
+bia,blue,20
+# trailing comment

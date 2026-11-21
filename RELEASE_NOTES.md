@@ -1,11 +1,13 @@
-# lua-polars 0.7.0
+# lua-polars 0.8.0
 
-- CSV reader `delimiter` and `header` options in Lua and the C ABI;
-- tests for custom delimiters, headerless files, invalid options, and parse
-  errors;
-- LuaRocks source-rock install now deploys the bridge through `$(LIBDIR)` and
-  the loader searches `package.cpath`;
-- `scripts/install-rock.sh` and `scripts/rockspec.sh` cover the rock install
-  path;
-- `drop_nulls`/`fill_null`, row iteration helpers, and `unique`/`null_count`;
-- 50 tests.
+- CSV reader `quote` and `comment` options in Lua and the additive
+  `pl_dataframe_read_csv_ex` C ABI; `false` or an empty string disables either
+  feature;
+- validation rejects multi-byte/control bytes and quote/comment/delimiter
+  collisions; malformed input still reports a parse error;
+- tests for custom quotes, disabled quoting, comment lines, combined reader
+  options, and invalid options;
+- `scripts/ensure-bridge.sh` reuses a fresh release bridge and rebuilds only
+  when it is missing or stale, keeping LuaRocks install validation incremental;
+- `scripts/build.sh` defaults to `CARGO_BUILD_JOBS=1`;
+- 56 tests.
