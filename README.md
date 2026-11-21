@@ -28,16 +28,16 @@ end
 
 `0.4.0` is an eager-first MVP:
 
-- CSV and Parquet readers
+- CSV and Parquet readers and writers
 - schema, shape, head
 - SQL queries against the DataFrame registered as `df`
-- helpers for select, filter, sort, and group-by
-- eager inner and left joins on one or more keys
+- helpers for select, filter, sort, group-by, drop, rename, and with-columns
+- eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and raw `to_json()`
 - explicit `:close()` plus Lua GC finalization
 
-Not implemented yet: LazyFrame expressions, Arrow
-zero-copy exchange, writes, streaming, and a LuaRocks package.
+Not implemented yet: LazyFrame expressions, Arrow zero-copy exchange,
+streaming/scan APIs, and a LuaRocks package.
 
 ## Requirements
 
@@ -61,9 +61,9 @@ CARGO_BUILD_JOBS=1 ./scripts/build.sh
 make test
 ```
 
-The test suite is dependency-free and covers CSV parsing, schema, projection,
-filtering, sorting, grouping, inner/left joins, SQL, JSON conversion, and error
-paths.
+The test suite is dependency-free and covers CSV/Parquet parsing and writing,
+schema, projection, filtering, sorting, grouping, all eager join types, column
+operations, SQL, JSON conversion, and error paths.
 
 ## API
 
@@ -82,7 +82,12 @@ df:select("a", "b")
 df:filter('"a" > 3')
 df:sort("a", true)
 df:group_by("team", { 'sum("score") AS total' })
-df:join(other, { on = "id", how = "left" })
+df:join(other, { on = "id", how = "full" })
+df:drop("unused")
+df:rename({ old = "new" })
+df:with_columns('"score" * 2 AS double_score')
+df:write_csv("out.csv")
+df:write_parquet("out.parquet")
 df:to_table()
 df:to_json()
 df:close()

@@ -1,4 +1,4 @@
-# lua-polars API — 0.1.0
+# lua-polars API — 0.4.0
 
 ## Modules
 
@@ -13,7 +13,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.1.0"`).
+Returns the bridge version (`"0.4.0"`).
 
 ### `polars.read_csv(path) -> DataFrame`
 
@@ -24,6 +24,8 @@ Errors if the path is missing, unreadable, or cannot be parsed.
 ### `polars.read_parquet(path) -> DataFrame`
 
 Reads a Parquet file.
+
+Errors if the path is missing, unreadable, or cannot be parsed.
 
 ### `polars.null`
 
@@ -38,7 +40,8 @@ an error.
 
 ### `df:schema() -> table`
 
-Maps column names to Polars dtype names, e.g. `{ score = "i64" }`.
+Maps column names to Polars dtype names, e.g. `{ score = "i64" }`. The order
+of keys in the returned Lua table is not significant.
 
 ### `df:head(n) -> DataFrame`
 
@@ -85,6 +88,34 @@ df:group_by("team", { 'sum("score") AS total' })
 
 Aggregate expressions are trusted SQL strings.
 
+### `df:drop(...) -> DataFrame`
+
+Returns a new frame without the named columns. Accepts one or more column-name
+strings as varargs.
+
+```lua
+df:drop("unused", "debug")
+```
+
+Dropping every column is an error.
+
+### `df:rename(mapping) -> DataFrame`
+
+Renames columns whose names appear as keys in `mapping`; other columns are
+kept. Values are the new column names.
+
+```lua
+df:rename({ score = "points" })
+```
+
+### `df:with_columns(...) -> DataFrame`
+
+Appends trusted SQL expressions as new columns, keeping the existing columns.
+
+```lua
+df:with_columns('"score" * 2 AS double_score')
+```
+
 ### `df:join(other, options) -> DataFrame`
 
 Eagerly joins `df` (the left frame) with `other` (the right frame). Both frames
@@ -102,18 +133,41 @@ local joined = left:join(right, {
 - `on`: a column name or list of names. Uses the same keys on both frames.
 - `left_on`, `right_on`: column names or lists for each side. Use these instead
   of `on` when the key names differ.
-- `how`: `"inner"` (default) or `"left"`. Other values are rejected.
+- `how`: `"inner"` (default), `"left"`, `"full"`/`"outer"`, `"semi"`, `"anti"`,
+  or `"cross"`.
 - `nulls_equal`: optional boolean (default `false`). When false, null keys do
   not match; when true, null keys match null keys.
 
+Join semantics:
+
+- `inner` keeps rows whose keys match on both sides.
+- `left` keeps every left row, with null right columns when no key matches.
+- `full` and `outer` are aliases; they keep every row from both sides.
+- `semi` keeps left rows that have a match and returns only left columns.
+- `anti` keeps left rows without a match and returns only left columns.
+- `cross` is a Cartesian product and does not accept `on`, `left_on`, or
+  `right_on`.
+
 Key lists must be non-empty, have the same length on both sides, contain no
 duplicate names, and name columns that exist in the corresponding frame. The
-result coalesces the join keys into one set of columns. Left joins keep every
-left row; right columns are null when no key matches. Duplicate non-key column
+result coalesces the join keys into one set of columns. Duplicate non-key column
 names are suffixed by Polars (`_right`).
 
 The error path covers missing keys, duplicate keys, mismatched key counts,
-invalid join types, invalid options, and closed handles.
+keys passed to a cross join, invalid join types, invalid options, and closed
+handles.
+
+### `df:write_csv(path) -> DataFrame`
+
+Writes the frame as CSV with a header row and returns `df` for chaining.
+The file is created or truncated. Errors when the frame is closed, the path is
+not a non-empty string, or the write fails.
+
+### `df:write_parquet(path) -> DataFrame`
+
+Writes the frame as Parquet and returns `df` for chaining. The file is created
+or truncated. Errors when the frame is closed, the path is not a non-empty
+string, or the write fails.
 
 ### `df:to_json() -> string`
 
@@ -147,6 +201,8 @@ PlFrame *pl_dataframe_join(
     const char *const *right_on, uint64_t right_count,
     int32_t nulls_equal, char **err);
 PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
+int pl_dataframe_write_csv(PlFrame *frame, const char *path, char **err);
+int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ```
@@ -154,12 +210,14 @@ void pl_string_free(char *value);
 Returned `char *` values and error strings must be freed with
 `pl_string_free`. A null frame pointer indicates an error when `err` is set.
 `pl_dataframe_join` borrows both input handles, including the key-name arrays
-for the duration of the call, and returns a newly owned frame.
+for the duration of the call, and returns a newly owned frame. The write
+functions return `0` on success and non-zero on error.
 
 ## Roadmap
 
-- [x] Eager inner/left DataFrame joins.
-- [ ] LazyFrame/expressions and the remaining join types.
+- [x] Eager inner/left/full/outer/semi/anti/cross DataFrame joins.
+- [x] CSV/Parquet writers and drop/rename/with-columns helpers.
+- [ ] LazyFrame/expressions.
 - [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.
-- [ ] CSV/Parquet writers and scan APIs.
-- [ ] LuaRocks packaging and CI with a cached Polars build.
+- [ ] Streaming and scan APIs.
+- [ ] LuaRocks packaging.
