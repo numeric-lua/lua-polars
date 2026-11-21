@@ -47,6 +47,7 @@ struct CsvReadConfig {
     quote: Option<u8>,
     comment: Option<u8>,
     columns: Option<Vec<String>>,
+    dtypes: Option<Vec<(String, DataType)>>,
 }
 
 impl Default for CsvReadConfig {
@@ -57,6 +58,7 @@ impl Default for CsvReadConfig {
             quote: Some(DEFAULT_CSV_QUOTE),
             comment: None,
             columns: None,
+            dtypes: None,
         }
     }
 }
@@ -157,6 +159,103 @@ unsafe fn read_csv_columns(
     Ok(Some(columns))
 }
 
+/// Maps a Lua-facing dtype name to a Polars dtype for CSV overrides.
+///
+/// Only dtypes the pinned CSV reader can build directly are accepted: the
+/// `dtype-i8`/`dtype-i16`/`dtype-u8`/`dtype-u16`/`dtype-date` Polars features
+/// are not enabled. Names are matched case-insensitively so `"F64"` and
+/// `"f64"` are the same override.
+fn parse_csv_dtype(value: &str) -> Result<DataType, String> {
+    let dtype = match value.to_ascii_lowercase().as_str() {
+        "bool" | "boolean" => DataType::Boolean,
+        "i32" | "int32" => DataType::Int32,
+        "i64" | "int64" => DataType::Int64,
+        "u32" | "uint32" => DataType::UInt32,
+        "u64" | "uint64" => DataType::UInt64,
+        "f32" | "float32" => DataType::Float32,
+        "f64" | "float64" => DataType::Float64,
+        "str" | "string" | "utf8" => DataType::String,
+        _ => {
+            return Err(format!(
+                "unsupported CSV dtype '{value}'; expected bool, i32, i64, u32, u64, \
+                 f32, f64, or str"
+            ))
+        },
+    };
+    Ok(dtype)
+}
+
+/// Reads optional CSV dtype overrides from the C ABI.
+///
+/// `dtypes` is a flat array of `column`, `dtype` string pairs; `dtype_count`
+/// is the number of pairs. A null pointer or a zero count leaves inference
+/// unchanged. Entries are validated eagerly so the caller gets a precise error
+/// before Polars touches the file.
+unsafe fn read_csv_dtypes(
+    ptr: *const *const c_char,
+    count: u64,
+) -> Result<Option<Vec<(String, DataType)>>, String> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if ptr.is_null() {
+        return Err("CSV dtypes are null".to_string());
+    }
+    let pairs: usize = count
+        .try_into()
+        .map_err(|_| "CSV dtype count is too large".to_string())?;
+    let value_count = pairs
+        .checked_mul(2)
+        .ok_or_else(|| "CSV dtype count is too large".to_string())?;
+    let raw = std::slice::from_raw_parts(ptr, value_count);
+    let mut seen = std::collections::HashSet::new();
+    let mut dtypes = Vec::with_capacity(pairs);
+    for index in 0..pairs {
+        let column = read_utf8(
+            raw[index * 2],
+            &format!("CSV dtype column at index {index}"),
+        )?;
+        if column.is_empty() {
+            return Err(format!(
+                "CSV dtype column at index {index} must not be empty"
+            ));
+        }
+        if !seen.insert(column.clone()) {
+            return Err(format!("duplicate CSV dtype column '{column}'"));
+        }
+        let value = read_utf8(raw[index * 2 + 1], &format!("CSV dtype for '{column}'"))?;
+        if value.is_empty() {
+            return Err(format!("CSV dtype for '{column}' must not be empty"));
+        }
+        dtypes.push((column, parse_csv_dtype(&value)?));
+    }
+    Ok(Some(dtypes))
+}
+
+/// Builds the Polars schema overwrite for the requested dtype overrides.
+///
+/// A projection limits which columns are read, so an override for a column
+/// outside it is rejected instead of being silently ignored.
+fn csv_schema_overwrite(config: &CsvReadConfig) -> Result<Option<SchemaRef>, String> {
+    let Some(dtypes) = config.dtypes.as_ref() else {
+        return Ok(None);
+    };
+    if let Some(columns) = &config.columns {
+        for (column, _) in dtypes {
+            if !columns.iter().any(|name| name == column) {
+                return Err(format!(
+                    "CSV dtype column '{column}' is not in the projection"
+                ));
+            }
+        }
+    }
+    let schema = dtypes
+        .iter()
+        .map(|(column, dtype)| (PlSmallStr::from_str(column), dtype.clone()))
+        .collect::<Schema>();
+    Ok(Some(Arc::new(schema)))
+}
+
 fn validate_csv_config(config: &CsvReadConfig) -> Result<(), String> {
     if config.quote == Some(config.delimiter) {
         return Err("CSV quote character must differ from the delimiter".to_string());
@@ -172,6 +271,7 @@ fn validate_csv_config(config: &CsvReadConfig) -> Result<(), String> {
 
 fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String> {
     validate_csv_config(&config)?;
+    let schema_overwrite = csv_schema_overwrite(&config)?;
     let columns: Option<Arc<[PlSmallStr]>> = config.columns.as_ref().map(|columns| {
         columns
             .iter()
@@ -181,6 +281,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
     let frame = CsvReadOptions::default()
         .with_has_header(config.has_header)
         .with_columns(columns)
+        .with_schema_overwrite(schema_overwrite)
         .map_parse_options(|options| {
             options
                 .with_separator(config.delimiter)
@@ -197,7 +298,20 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
         Some(columns) => frame
             .select(columns.iter().map(|name| name.as_str()))
             .map_err(|error| error.to_string()),
-        None => Ok(frame),
+        None => {
+            // Schema overwrites are applied by name. Polars ignores names that
+            // are not in the file, so reject typos after the headers are known.
+            if let Some(dtypes) = &config.dtypes {
+                for (column, _) in dtypes {
+                    if frame.get_column_index(column.as_str()).is_none() {
+                        return Err(format!(
+                            "CSV dtype column '{column}' is not a column in the file"
+                        ));
+                    }
+                }
+            }
+            Ok(frame)
+        },
     }
 }
 
@@ -360,6 +474,7 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_ex(
             quote: read_csv_quote(quote)?,
             comment: read_csv_comment(comment)?,
             columns: None,
+            dtypes: None,
         };
         read_csv_frame(&path, config)
     }));
@@ -374,6 +489,9 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_ex(
 /// column. The returned frame keeps the requested order; duplicate or unknown
 /// names are errors. This entry point is additive; the earlier reader
 /// signatures keep their defaults.
+///
+/// [`pl_dataframe_read_csv_typed`] combines this projection with dtype
+/// overrides.
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_csv_projected(
     path: *const c_char,
@@ -393,6 +511,50 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_projected(
             quote: read_csv_quote(quote)?,
             comment: read_csv_comment(comment)?,
             columns: read_csv_columns(columns, column_count)?,
+            dtypes: None,
+        };
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with delimiter, header, quote, comment, projection, and
+/// dtype override controls.
+///
+/// `columns` and its `column_count` have the same meaning as in
+/// [`pl_dataframe_read_csv_projected`]. `dtypes` points to `dtype_count`
+/// `column`, `dtype` string pairs (a flat array of `2 * dtype_count` UTF-8
+/// strings). Overrides are applied by column name after the header is known;
+/// duplicates and unsupported dtype names are errors, as is an override for a
+/// column outside the projection or absent from the file. A null pointer or a
+/// zero count keeps Polars inference.
+///
+/// Supported dtype aliases are `bool`/`boolean`, `i32`/`i64`, `u32`/`u64`,
+/// `f32`/`f64`, and `str`/`string`/`utf8`; these are the dtypes the pinned
+/// CSV reader can build directly. Matching is case-insensitive. This entry
+/// point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_typed(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let config = CsvReadConfig {
+            delimiter: read_delimiter(delimiter)?,
+            has_header: has_header != 0,
+            quote: read_csv_quote(quote)?,
+            comment: read_csv_comment(comment)?,
+            columns: read_csv_columns(columns, column_count)?,
+            dtypes: read_csv_dtypes(dtypes, dtype_count)?,
         };
         read_csv_frame(&path, config)
     }));

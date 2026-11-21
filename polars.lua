@@ -22,6 +22,11 @@ PlFrame *pl_dataframe_read_csv_projected(
     const char *path, const char *delimiter, int32_t has_header,
     const char *quote, const char *comment,
     const char *const *columns, uint64_t column_count, char **err);
+PlFrame *pl_dataframe_read_csv_typed(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -522,6 +527,7 @@ local CSV_OPTION_KEYS = {
   quote = true,
   comment = true,
   columns = true,
+  dtypes = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -581,9 +587,44 @@ local function csv_columns(value)
   return result
 end
 
+-- Flattens the `dtypes` map into the ABI's column/dtype string pairs.
+-- Sorting by column name keeps error reporting deterministic even though Lua
+-- table iteration order is not. Dtype names are validated by the bridge so
+-- there is a single alias table.
+local function csv_dtypes(value)
+  if value == nil then
+    return nil, 0
+  end
+  if type(value) ~= "table" then
+    error("read_csv dtypes must be a table of column = dtype pairs", 3)
+  end
+  local entries = {}
+  for column, dtype in pairs(value) do
+    if type(column) ~= "string" or column == "" then
+      error("read_csv dtypes keys must be non-empty column names", 3)
+    end
+    if type(dtype) ~= "string" or dtype == "" then
+      error("read_csv dtypes values must be non-empty dtype names", 3)
+    end
+    entries[#entries + 1] = { column, dtype }
+  end
+  if #entries == 0 then
+    error("read_csv dtypes must not be empty", 3)
+  end
+  table.sort(entries, function(left, right)
+    return left[1] < right[1]
+  end)
+  local flat = {}
+  for index, entry in ipairs(entries) do
+    flat[index * 2 - 1] = entry[1]
+    flat[index * 2] = entry[2]
+  end
+  return flat, #entries
+end
+
 local function csv_options(options)
   if options == nil then
-    return ",", true, '"', "", nil
+    return ",", true, '"', "", nil, nil, 0
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -606,24 +647,37 @@ local function csv_options(options)
   local quote = csv_byte_option(options, "quote", '"')
   local comment = csv_byte_option(options, "comment", "")
   local columns = csv_columns(options.columns)
-  return delimiter, header, quote, comment, columns
+  local dtypes, dtype_count = csv_dtypes(options.dtypes)
+  return delimiter, header, quote, comment, columns, dtypes, dtype_count
 end
 
 function polars.read_csv(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_csv path must be a non-empty string", 2)
   end
-  local delimiter, header, quote, comment, columns = csv_options(options)
+  local delimiter, header, quote, comment, columns, dtypes, dtype_count =
+    csv_options(options)
   local err = ffi.new("char *[1]")
-  local pointer
-  if columns == nil then
-    pointer = lib.pl_dataframe_read_csv_ex(path, delimiter,
-      header and 1 or 0, quote, comment, err)
-  else
-    local names = ffi.new("const char *[?]", #columns)
+  local names
+  if columns ~= nil then
+    names = ffi.new("const char *[?]", #columns)
     for index, name in ipairs(columns) do
       names[index - 1] = name
     end
+  end
+  local pointer
+  if dtypes ~= nil then
+    local dtype_pairs = ffi.new("const char *[?]", #dtypes)
+    for index, value in ipairs(dtypes) do
+      dtype_pairs[index - 1] = value
+    end
+    pointer = lib.pl_dataframe_read_csv_typed(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, err)
+  elseif columns == nil then
+    pointer = lib.pl_dataframe_read_csv_ex(path, delimiter,
+      header and 1 or 0, quote, comment, err)
+  else
     pointer = lib.pl_dataframe_read_csv_projected(path, delimiter,
       header and 1 or 0, quote, comment, names, #columns, err)
   end
