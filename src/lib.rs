@@ -218,6 +218,34 @@ pub unsafe extern "C" fn pl_dataframe_schema_json(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_columns_json(
+    ptr: *mut PlFrame,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<String, String> {
+        let frame = frame_ref(ptr)?;
+        let names: Vec<String> = frame
+            .df
+            .columns()
+            .iter()
+            .map(|column| column.name().to_string())
+            .collect();
+        serde_json::to_string(&names).map_err(|error| error.to_string())
+    }));
+    match result {
+        Ok(Ok(json)) => c_string(&json),
+        Ok(Err(message)) => {
+            set_error(err, message);
+            ptr::null_mut()
+        },
+        Err(payload) => {
+            set_error(err, panic_message(payload));
+            ptr::null_mut()
+        },
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_head(
     ptr: *mut PlFrame,
     n: i64,

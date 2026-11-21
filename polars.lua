@@ -17,6 +17,7 @@ PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
+char *pl_dataframe_columns_json(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
 PlFrame *pl_dataframe_join(
     PlFrame *left, PlFrame *right, const char *how,
@@ -143,6 +144,12 @@ function DataFrame:schema()
   return json.decode(string_result(pointer, err))
 end
 
+function DataFrame:columns()
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_columns_json(self:_require_open(), err)
+  return json.decode(string_result(pointer, err))
+end
+
 function DataFrame:head(count)
   count = count == nil and 5 or count
   if type(count) ~= "number" or count < 0 or count % 1 ~= 0 then
@@ -179,20 +186,19 @@ function DataFrame:drop(...)
   local drop = {}
   for _, name in ipairs({ ... }) do drop[name] = true end
   local columns = {}
-  for name in pairs(self:schema()) do
+  for _, name in ipairs(self:columns()) do
     if not drop[name] then columns[#columns + 1] = name end
   end
-  table.sort(columns)
+  if #columns == 0 then
+    error("drop must leave at least one column", 2)
+  end
   return self:sql_select(columns)
 end
 
 function DataFrame:rename(mapping)
   if type(mapping) ~= "table" then error("rename expects a table", 2) end
-  local columns = {}
-  for name in pairs(self:schema()) do columns[#columns + 1] = name end
-  table.sort(columns)
   local parts = {}
-  for _, name in ipairs(columns) do
+  for _, name in ipairs(self:columns()) do
     if mapping[name] ~= nil then
       parts[#parts + 1] = quote_ident(name) .. " AS " .. quote_ident(mapping[name])
     else parts[#parts + 1] = quote_ident(name) end
@@ -202,11 +208,8 @@ end
 
 function DataFrame:with_columns(...)
   local expressions = { ... }
-  local columns = {}
-  for name in pairs(self:schema()) do columns[#columns + 1] = name end
-  table.sort(columns)
   local parts = {}
-  for _, name in ipairs(columns) do parts[#parts + 1] = quote_ident(name) end
+  for _, name in ipairs(self:columns()) do parts[#parts + 1] = quote_ident(name) end
   for _, expression in ipairs(expressions) do parts[#parts + 1] = expression end
   return self:sql("SELECT " .. table.concat(parts, ", ") .. " FROM df")
 end
