@@ -415,7 +415,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.4.0",
+  _VERSION = "0.5.0",
   null = json.null,
   DataFrame = DataFrame,
 }

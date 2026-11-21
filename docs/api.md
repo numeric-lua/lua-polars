@@ -1,4 +1,4 @@
-# lua-polars API — 0.4.0
+# lua-polars API — 0.5.0
 
 ## Modules
 
@@ -12,13 +12,13 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 The `columns()` method, the column-order guarantee, and the install workflow
 below are on `main` for the next release; `polars.version()` remains
-`"0.4.0"`.
+`"0.5.0"`.
 
 ## Top-level
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.4.0"`).
+Returns the bridge version (`"0.5.0"`).
 
 ### `polars.read_csv(path) -> DataFrame`
 

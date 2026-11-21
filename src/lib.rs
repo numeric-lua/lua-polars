@@ -127,7 +127,7 @@ unsafe fn finish_frame(
 
 #[no_mangle]
 pub extern "C" fn pl_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.4.0\0";
+    static VERSION: &[u8] = b"0.5.0\0";
     VERSION.as_ptr() as *const c_char
 }
 

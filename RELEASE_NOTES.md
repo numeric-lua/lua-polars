@@ -1,5 +1,6 @@
-# lua-polars 0.4.0
+# lua-polars 0.5.0
 
-- CSV and Parquet writers;
-- drop/rename/with_columns helpers;
-- 32 tests.
+- ordered `df:columns()` and stable column order;
+- writer round-trip and failure-path tests;
+- prefix install/smoke workflow and default library discovery fix;
+- 42 tests.
