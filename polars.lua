@@ -216,8 +216,7 @@ local function write_frame(self, path, method)
   local err = ffi.new("char *[1]")
   local status = lib[method](self:_require_open(), path, err)
   if status ~= 0 then
-    local message = err[0] ~= nil and ffi.string(err[0]) or method .. " failed"
-    error(message, 2)
+    error(take_error(err), 2)
   end
   return self
 end

@@ -56,6 +56,26 @@ local function find_row(rows, fields)
   error("no row matched the requested fields", 2)
 end
 
+local function temp_path(suffix)
+  local path = os.tmpname()
+  os.remove(path)
+  return path .. (suffix or "")
+end
+
+local temp_files = {}
+local function new_temp_path(suffix)
+  local path = temp_path(suffix)
+  temp_files[#temp_files + 1] = path
+  return path
+end
+
+local function cleanup_temp_files()
+  for _, path in ipairs(temp_files) do
+    os.remove(path)
+  end
+  temp_files = {}
+end
+
 current = "module"
 test("version is exposed", function()
   eq(polars.version(), "0.4.0")
@@ -370,6 +390,82 @@ test("reads a Parquet file", function()
   df:close()
 end)
 
+current = "writers"
+local roundtrip_fixture = root .. "/tests/fixtures/roundtrip.csv"
+
+local function check_roundtrip_frame(df)
+  eq(select(1, df:shape()), 3)
+  eq(select(2, df:shape()), 3)
+  local schema = df:schema()
+  eq(schema.id, "i64")
+  eq(schema.name, "str")
+  eq(schema.note, "str")
+  local rows = df:to_table()
+  eq(find_row(rows, { id = 1 }).note, "hello, world")
+  eq(find_row(rows, { id = 2 }).note, 'say "hi"')
+  eq(find_row(rows, { id = 3 }).name, "caio")
+  eq(find_row(rows, { id = 3 }).note, polars.null)
+end
+
+test("CSV writer round-trips quoted strings, nulls, and schema", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  eq(df:write_csv(out), df, "write_csv return value")
+  local loaded = polars.read_csv(out)
+  check_roundtrip_frame(loaded)
+  loaded:close()
+  df:close()
+end)
+test("Parquet writer round-trips quoted strings, nulls, and schema", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".parquet")
+  eq(df:write_parquet(out), df, "write_parquet return value")
+  local loaded = polars.read_parquet(out)
+  check_roundtrip_frame(loaded)
+  loaded:close()
+  df:close()
+end)
+test("writers reject empty and non-string paths", function()
+  local df = polars.read_csv(fixture)
+  for _, method in ipairs({ "write_csv", "write_parquet" }) do
+    for _, value in ipairs({ "", 42 }) do
+      local ok, err = pcall(function()
+        df[method](df, value)
+      end)
+      eq(ok, false, method .. " invalid path")
+      truthy(tostring(err):find("path must be a string"),
+        method .. " path error")
+    end
+  end
+  df:close()
+end)
+test("writers report filesystem errors", function()
+  local df = polars.read_csv(fixture)
+  local base = temp_path()
+  for _, suffix in ipairs({ ".csv", ".parquet" }) do
+    local method = suffix == ".csv" and "write_csv" or "write_parquet"
+    local ok, err = pcall(function()
+      df[method](df, base .. "/missing/out" .. suffix)
+    end)
+    eq(ok, false, method .. " missing directory")
+    local message = tostring(err)
+    truthy(message:find("No such file") or message:find("os error"),
+      method .. " filesystem error")
+  end
+  df:close()
+end)
+test("writers reject a closed frame", function()
+  local df = polars.read_csv(fixture)
+  df:close()
+  for _, method in ipairs({ "write_csv", "write_parquet" }) do
+    local ok, err = pcall(function()
+      df[method](df, new_temp_path(".out"))
+    end)
+    eq(ok, false, method .. " closed frame")
+    truthy(tostring(err):find("closed"), method .. " closed-frame error")
+  end
+end)
+
 current = "errors"
 test("missing file is an error", function()
   local ok, err = pcall(polars.read_csv, root .. "/tests/fixtures/missing.csv")
@@ -416,21 +512,7 @@ test("null sentinel is available", function()
   eq(tostring(polars.null), "null")
 end)
 
-test("writes CSV and Parquet and supports column operations", function()
-  local df = polars.read_csv(join_left)
-  local dir = os.getenv("TMPDIR") or "/tmp"
-  local csv, parquet = dir .. "/lua-polars-out.csv", dir .. "/lua-polars-out.parquet"
-  df:write_csv(csv); df:write_parquet(parquet)
-  local loaded = polars.read_csv(csv); eq(select(1, loaded:shape()), 5); loaded:close()
-  local p = polars.read_parquet(parquet); eq(select(1, p:shape()), 5); p:close()
-  local dropped = df:drop("team"); eq(select(2, dropped:shape()), 2); dropped:close()
-  local renamed = df:rename({ name = "person" })
-  truthy(renamed:schema().person ~= nil, "renamed column"); renamed:close()
-  local with = df:with_columns('"id" * 2 AS double_id')
-  truthy(with:schema().double_id ~= nil, "with_columns column"); with:close()
-  os.remove(csv); os.remove(parquet)
-  df:close()
-end)
+cleanup_temp_files()
 
 io.write(string.format("\n\n%d tests, %d passed, %d failed\n", passed + failed,
   passed, failed))
