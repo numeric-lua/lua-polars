@@ -220,11 +220,32 @@ The error path covers missing keys, duplicate keys, mismatched key counts,
 keys passed to a cross join, invalid join types, invalid options, and closed
 handles.
 
-### `df:write_csv(path) -> DataFrame`
+### `df:write_csv(path [, options]) -> DataFrame`
 
-Writes the frame as CSV with a header row and returns `df` for chaining.
-The file is created or truncated. Errors when the frame is closed, the path is
-not a non-empty string, or the write fails.
+Writes the frame as CSV and returns `df` for chaining. The file is created or
+truncated. With no options it writes a comma-separated file with a header row
+and empty fields for nulls, as before.
+
+`options` is an optional table:
+
+- `delimiter`: a one-byte field separator, default `","`. Quote, newline,
+  carriage return, and NUL bytes are rejected.
+- `header`: a boolean, default `true`. Set it to `false` to omit the header row.
+- `null_value`: the literal placeholder written for null fields, default the
+  empty string. Polars writes it without quoting, so a value containing the
+  delimiter, `"`, NUL, newline, or carriage return is rejected.
+
+```lua
+df:write_csv("out.csv")
+df:write_csv("out.tsv", {
+  delimiter = "\t",
+  header = false,
+  null_value = "NA",
+})
+```
+
+Unknown option keys and invalid types are errors, as are closed frames,
+non-string or empty paths, and write failures.
 
 ### `df:write_parquet(path) -> DataFrame`
 
@@ -280,6 +301,9 @@ PlFrame *pl_dataframe_join(
     int32_t nulls_equal, char **err);
 PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
 int pl_dataframe_write_csv(PlFrame *frame, const char *path, char **err);
+int pl_dataframe_write_csv_options(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
@@ -318,6 +342,14 @@ A null array with a non-zero count is an error. The supported dtype names match
 the Lua option, and a projection that omits an overridden column is rejected.
 The earlier reader signatures and defaults are unchanged.
 
+`pl_dataframe_write_csv_options` is additive; `pl_dataframe_write_csv` keeps
+its signature and comma/header/empty-null defaults. A null `delimiter` means
+`","`; `has_header` is zero to omit the header row. A null or empty
+`null_value` writes empty fields for nulls. The placeholder is written
+literally, so it may not contain the delimiter, `"`, NUL, newline, or
+carriage-return bytes. All string arguments are borrowed for the duration of
+the call.
+
 ## Install layouts
 
 ### LuaRocks source rock
@@ -343,11 +375,11 @@ source tag referenced by the rockspec is created with the release; before that,
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
 between `Cargo.toml`, `Cargo.lock`, `polars.lua`, the rockspec, README, API
 docs, and release notes fails before a build. It then validates the install in
-a temporary tree without forcing a cold rebuild. Set
-`POLARS_LUA_ROCK_TREE=/tmp/lua-polars-rock` to reuse a tree across repeated
-checks; a content stamp skips `luarocks make` while the rockspec, Lua modules,
-install script, and native bridge are unchanged. Set
-`POLARS_LUA_ROCK_FORCE=1` to force a reinstall into that tree.
+the ignored `.luarocks-tree/` directory, so repeated checks are incremental
+without forcing a cold rebuild. A content stamp skips `luarocks make` while the
+rockspec, Lua modules, install script, and native bridge are unchanged. Set
+`POLARS_LUA_ROCK_TREE=/tmp/lua-polars-rock` to use another tree and
+`POLARS_LUA_ROCK_FORCE=1` to force a reinstall into it.
 
 ### Prefix install
 
@@ -374,6 +406,7 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV reader delimiter and header options.
 - [x] CSV reader quote and comment options.
 - [x] CSV reader column projection.
+- [x] CSV writer delimiter, header, and null-value options.
 - [x] LuaRocks source-rock packaging.
 - [ ] LazyFrame/expressions.
 - [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.

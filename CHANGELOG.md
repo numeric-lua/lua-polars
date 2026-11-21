@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.0
+
+- `df:write_csv(path, options)` accepts a one-byte `delimiter`, a `header`
+  boolean (default `true`; `false` omits the header row), and a literal
+  `null_value` placeholder for null fields (default the empty string);
+- the additive `pl_dataframe_write_csv_options` C ABI entry point carries the
+  writer settings; `pl_dataframe_write_csv` keeps its comma/header/empty-null
+  signature and defaults;
+- writer options are validated eagerly: unknown fields, a non-boolean `header`,
+  invalid one-byte delimiters, and a `null_value` containing the delimiter,
+  `"`, NUL, newline, or carriage return are errors;
+- tests cover semicolon and headerless round-trips, the literal null
+  placeholder, unchanged default bytes, option validation, closed-frame and
+  filesystem errors, and the installed-tree writer path;
+- `scripts/rockspec.sh` now defaults to the ignored `.luarocks-tree/`
+  directory, so repeated LuaRocks validation reuses the install stamp;
+  `POLARS_LUA_ROCK_TREE` selects another tree and `POLARS_LUA_ROCK_FORCE=1`
+  still forces a reinstall;
+- 73 tests.
+
 ## 0.10.0
 
 - `polars.read_csv(path, options)` accepts `dtypes`, a table that overrides
