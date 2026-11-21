@@ -583,6 +583,16 @@ test("drop_nulls and fill_null work on CSV nulls", function()
   eq(ok, false); bad:close()
 end)
 
+test("row iteration and emptiness helpers", function()
+  local df = polars.read_csv(fixture)
+  local count = 0
+  for row in df:iter_rows() do count = count + 1 end
+  eq(count, select(1, df:shape()))
+  eq(df:is_empty(), false)
+  eq(#df:column_names(), select(2, df:shape()))
+  df:close()
+end)
+
 io.write(string.format("\n\n%d tests, %d passed, %d failed\n", passed + failed,
   passed, failed))
 if failed > 0 then

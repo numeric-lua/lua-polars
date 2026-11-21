@@ -258,6 +258,24 @@ function DataFrame:to_json()
   return string_result(pointer, err)
 end
 
+function DataFrame:column_names()
+  return self:columns()
+end
+
+function DataFrame:is_empty()
+  local rows = self:shape()
+  return rows == 0
+end
+
+function DataFrame:iter_rows()
+  local rows = self:to_table()
+  local index = 0
+  return function()
+    index = index + 1
+    return rows[index]
+  end
+end
+
 function DataFrame:to_table()
   return json.decode(self:to_json())
 end
