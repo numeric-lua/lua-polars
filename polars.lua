@@ -226,6 +226,23 @@ local function quote_identifier(name)
   return '"' .. tostring(name):gsub('"', '""') .. '"'
 end
 
+function DataFrame:unique()
+  return self:sql("SELECT DISTINCT * FROM df")
+end
+
+function DataFrame:null_count()
+  local counts = {}
+  for _, name in ipairs(self:columns()) do
+    local query = string.format("SELECT COUNT(*) AS n FROM df WHERE %s IS NULL",
+      quote_identifier(name))
+    local frame = self:sql(query)
+    local rows = frame:to_table()
+    counts[name] = rows[1] and rows[1].n or 0
+    frame:close()
+  end
+  return counts
+end
+
 function DataFrame:drop_nulls()
   local conditions = {}
   for _, name in ipairs(self:columns()) do

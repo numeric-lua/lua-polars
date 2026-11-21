@@ -593,6 +593,16 @@ test("row iteration and emptiness helpers", function()
   df:close()
 end)
 
+test("unique and null_count", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local counts = df:null_count()
+  eq(counts.note, 1)
+  eq(counts.id, 0)
+  local unique = df:unique()
+  eq(select(1, unique:shape()), 3)
+  unique:close(); df:close()
+end)
+
 io.write(string.format("\n\n%d tests, %d passed, %d failed\n", passed + failed,
   passed, failed))
 if failed > 0 then
