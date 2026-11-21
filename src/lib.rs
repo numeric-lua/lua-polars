@@ -63,6 +63,23 @@ impl Default for CsvReadConfig {
     }
 }
 
+#[derive(Clone)]
+struct CsvWriteConfig {
+    delimiter: u8,
+    include_header: bool,
+    null_value: Option<String>,
+}
+
+impl Default for CsvWriteConfig {
+    fn default() -> Self {
+        Self {
+            delimiter: DEFAULT_CSV_DELIMITER,
+            include_header: true,
+            null_value: None,
+        }
+    }
+}
+
 /// Reads the optional one-byte CSV delimiter from the C ABI.
 ///
 /// A null pointer keeps the Polars default. The delimiter has to fit in one
@@ -123,6 +140,38 @@ unsafe fn read_csv_quote(ptr: *const c_char) -> Result<Option<u8>, String> {
 
 unsafe fn read_csv_comment(ptr: *const c_char) -> Result<Option<u8>, String> {
     read_optional_byte(ptr, "comment")
+}
+
+/// Reads the optional CSV null-value placeholder for the writer.
+///
+/// A null pointer or an empty string keeps the default empty field. Polars
+/// writes the placeholder literally, so bytes that would change the CSV
+/// structure (the delimiter, the `"` quote, line breaks, and NUL) are rejected
+/// instead of producing a file that cannot be read back unambiguously.
+unsafe fn read_csv_null_value(ptr: *const c_char, delimiter: u8) -> Result<Option<String>, String> {
+    if ptr.is_null() {
+        return Ok(None);
+    }
+    let text = read_utf8(ptr, "null_value")?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    for byte in text.bytes() {
+        let reason = match byte {
+            0 => Some("NUL"),
+            b'\n' => Some("newline"),
+            b'\r' => Some("carriage return"),
+            b'"' => Some("quote"),
+            byte if byte == delimiter => Some("delimiter"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            return Err(format!(
+                "CSV null_value must not contain a {reason} byte (0x{byte:02x})"
+            ));
+        }
+    }
+    Ok(Some(text))
 }
 
 /// Reads an optional CSV projection from the C ABI.
@@ -787,6 +836,35 @@ pub unsafe extern "C" fn pl_string_free(value: *mut c_char) {
     }
 }
 
+fn write_csv_frame(df: &DataFrame, path: &str, config: CsvWriteConfig) -> Result<(), String> {
+    let file = File::create(path).map_err(|error| error.to_string())?;
+    let mut df = df.clone();
+    let mut writer = CsvWriter::new(file)
+        .include_header(config.include_header)
+        .with_separator(config.delimiter);
+    if let Some(null_value) = config.null_value {
+        writer = writer.with_null_value(PlSmallStr::from_str(&null_value));
+    }
+    writer.finish(&mut df).map_err(|error| error.to_string())
+}
+
+unsafe fn finish_write(
+    result: std::thread::Result<Result<(), String>>,
+    err: *mut *mut c_char,
+) -> i32 {
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(message)) => {
+            set_error(err, message);
+            1
+        },
+        Err(_) => {
+            set_error(err, "write_csv panicked");
+            1
+        },
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_write_csv(
     ptr: *mut PlFrame,
@@ -796,16 +874,42 @@ pub unsafe extern "C" fn pl_dataframe_write_csv(
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
         let frame = frame_ref(ptr)?;
         let path = read_path(path)?;
-        let file = File::create(&path).map_err(|error| error.to_string())?;
-        let mut df = frame.df.clone();
-        CsvWriter::new(file).finish(&mut df).map_err(|error| error.to_string())?;
-        Ok(())
+        write_csv_frame(&frame.df, &path, CsvWriteConfig::default())
     }));
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(message)) => { set_error(err, message); 1 }
-        Err(_) => { set_error(err, "write_csv panicked"); 1 }
-    }
+    finish_write(result, err)
+}
+
+/// Writes a CSV file with delimiter, header, and null-value controls.
+///
+/// `delimiter` may be null to keep the default comma; it has the same one-byte
+/// and quote/newline restrictions as the reader. `has_header` is zero to omit
+/// the header row. A null or empty `null_value` writes empty fields for nulls;
+/// otherwise the placeholder is written literally and may not contain the
+/// delimiter, `"`, NUL, newline, or carriage-return bytes.
+///
+/// This entry point is additive; [`pl_dataframe_write_csv`] keeps its
+/// signature and comma/header/empty-null defaults.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_csv_options(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    null_value: *const c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let delimiter = read_delimiter(delimiter)?;
+        let config = CsvWriteConfig {
+            delimiter,
+            include_header: has_header != 0,
+            null_value: read_csv_null_value(null_value, delimiter)?,
+        };
+        write_csv_frame(&frame.df, &path, config)
+    }));
+    finish_write(result, err)
 }
 
 #[no_mangle]

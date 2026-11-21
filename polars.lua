@@ -40,6 +40,9 @@ PlFrame *pl_dataframe_join(
     int32_t nulls_equal, char **err);
 PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
 int pl_dataframe_write_csv(PlFrame *frame, const char *path, char **err);
+int pl_dataframe_write_csv_options(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
@@ -257,6 +260,70 @@ local function write_frame(self, path, method)
   return self
 end
 
+local WRITE_CSV_OPTION_KEYS = {
+  delimiter = true,
+  header = true,
+  null_value = true,
+}
+
+local function write_csv_delimiter(value)
+  if value == nil then
+    return ","
+  end
+  if type(value) ~= "string" then
+    error("write_csv delimiter must be a one-byte string", 3)
+  end
+  if #value ~= 1 then
+    error("write_csv delimiter must be exactly one byte", 3)
+  end
+  if value == "\n" or value == "\r" or value == "\0" or value == '"' then
+    error("write_csv delimiter byte is not allowed", 3)
+  end
+  return value
+end
+
+-- Polars writes the placeholder literally, so a value containing structure
+-- bytes would make the output ambiguous instead of quoted.
+local function write_csv_null_value(value, delimiter)
+  if value == nil then
+    return ""
+  end
+  if type(value) ~= "string" then
+    error("write_csv null_value must be a string", 3)
+  end
+  if value:find("\0", 1, true) or value:find("\n", 1, true) or
+      value:find("\r", 1, true) then
+    error("write_csv null_value must not contain NUL, newline, or carriage return", 3)
+  end
+  if value:find(delimiter, 1, true) then
+    error("write_csv null_value must not contain the delimiter", 3)
+  end
+  if value:find('"', 1, true) then
+    error("write_csv null_value must not contain the quote character", 3)
+  end
+  return value
+end
+
+local function write_csv_options(options)
+  if type(options) ~= "table" then
+    error("write_csv options must be a table", 3)
+  end
+  for key in pairs(options) do
+    if not WRITE_CSV_OPTION_KEYS[key] then
+      error("write_csv options: unknown field '" .. tostring(key) .. "'", 3)
+    end
+  end
+  local delimiter = write_csv_delimiter(options.delimiter)
+  local header = options.header
+  if header == nil then
+    header = true
+  end
+  if type(header) ~= "boolean" then
+    error("write_csv header must be a boolean", 3)
+  end
+  return delimiter, header, write_csv_null_value(options.null_value, delimiter)
+end
+
 local function quote_identifier(name)
   return '"' .. tostring(name):gsub('"', '""') .. '"'
 end
@@ -301,7 +368,22 @@ function DataFrame:fill_null(strategy)
   return self:sql("SELECT " .. table.concat(projections, ", ") .. " FROM df")
 end
 
-function DataFrame:write_csv(path) return write_frame(self, path, "pl_dataframe_write_csv") end
+function DataFrame:write_csv(path, options)
+  if options == nil then
+    return write_frame(self, path, "pl_dataframe_write_csv")
+  end
+  if type(path) ~= "string" or path == "" then
+    error("write_csv path must be a string", 2)
+  end
+  local delimiter, header, null_value = write_csv_options(options)
+  local err = ffi.new("char *[1]")
+  local status = lib.pl_dataframe_write_csv_options(self:_require_open(), path,
+    delimiter, header and 1 or 0, null_value, err)
+  if status ~= 0 then
+    error(take_error(err), 2)
+  end
+  return self
+end
 function DataFrame:write_parquet(path) return write_frame(self, path, "pl_dataframe_write_parquet") end
 
 function DataFrame:to_json()
