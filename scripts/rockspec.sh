@@ -3,24 +3,22 @@
 #
 # The version gate runs first, then this reuses or incrementally rebuilds the
 # release library, installs the checkout through the rockspec, and requires the
-# module from the resulting tree without POLARS_LUA_LIB. Set
-# POLARS_LUA_ROCK_TREE to reuse a tree across repeated checks; the default is a
-# clean temporary tree. A content stamp skips `luarocks make` when that tree
-# already matches the rockspec, Lua modules, install script, and bridge;
-# POLARS_LUA_ROCK_FORCE=1 forces a reinstall.
+# module from the resulting tree without POLARS_LUA_LIB. The default tree is
+# .luarocks-tree in the checkout, so repeated checks are incremental; set
+# POLARS_LUA_ROCK_TREE to use another tree. A content stamp skips
+# `luarocks make` when that tree already matches the rockspec, Lua modules,
+# install script, and bridge; POLARS_LUA_ROCK_FORCE=1 forces a reinstall.
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 if [ -n "${POLARS_LUA_ROCK_TREE:-}" ]; then
   TREE=$POLARS_LUA_ROCK_TREE
-  mkdir -p "$TREE"
-  echo "reusing LuaRocks tree: $TREE"
+  echo "using LuaRocks tree: $TREE"
 else
-  TMP=$(mktemp -d "${TMPDIR:-/tmp}/lua-polars-rock.XXXXXX")
-  trap 'rm -rf "$TMP"' EXIT
-  trap 'exit 1' HUP INT TERM
-  TREE="$TMP/tree"
+  TREE="$ROOT/.luarocks-tree"
+  echo "using incremental LuaRocks tree: $TREE (set POLARS_LUA_ROCK_TREE to override)"
 fi
+mkdir -p "$TREE"
 
 set -- "$ROOT"/lua-polars-*.rockspec
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
@@ -57,9 +55,10 @@ wanted=$(fingerprint)
 if [ "${POLARS_LUA_ROCK_FORCE:-0}" != "1" ] && [ -f "$STAMP_FILE" ] &&
   [ "$(cat "$STAMP_FILE")" = "$wanted" ] &&
   [ -n "$installed_module" ] && [ -n "$installed_bridge" ]; then
-  echo "reusing installed LuaRocks tree: $TREE"
+  echo "install stamp unchanged; reusing installed tree: $TREE"
 else
   rm -f "$STAMP_FILE"
+  echo "installing through the rockspec into: $TREE"
   luarocks make --tree="$TREE" --deps-mode=none "$ROCKSPEC"
   printf '%s\n' "$wanted" >"$STAMP_FILE"
 fi
