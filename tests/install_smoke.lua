@@ -37,4 +37,14 @@ check(table.concat(projected:columns(), ",") == "score,name",
 check(projected:to_table()[1].score == 10, "unexpected projected value")
 projected:close()
 
+local typed = polars.read_csv(fixture, {
+  columns = { "score", "name" },
+  dtypes = { score = "f64" },
+})
+check(typed:schema().score == "f64", "unexpected dtype override")
+check(table.concat(typed:columns(), ",") == "score,name",
+  "unexpected typed column order")
+check(typed:to_table()[1].score == 10, "unexpected typed value")
+typed:close()
+
 io.write("install smoke: ok\n")

@@ -297,6 +297,108 @@ test("projection rejects unknown and duplicate columns", function()
   truthy(tostring(err):find("duplicate", 1, true),
     "duplicate projected column error: " .. tostring(err))
 end)
+test("dtype override changes the inferred schema and values", function()
+  local numeric = polars.read_csv(fixture, { dtypes = { score = "f64" } })
+  local schema = numeric:schema()
+  eq(schema.score, "f64")
+  eq(schema.name, "str")
+  eq(schema.active, "bool")
+  eq(numeric:to_table()[1].score, 10)
+  numeric:close()
+  local text = polars.read_csv(fixture, { dtypes = { score = "str" } })
+  eq(text:schema().score, "str")
+  eq(text:to_table()[1].score, "10")
+  eq(text:to_table()[5].score, "9")
+  text:close()
+end)
+test("dtype override accepts aliases and integer widths", function()
+  local df = polars.read_csv(fixture, {
+    dtypes = { score = "UINT32", active = "Boolean" },
+  })
+  local schema = df:schema()
+  eq(schema.score, "u32")
+  eq(schema.active, "bool")
+  eq(df:to_table()[1].active, true)
+  df:close()
+end)
+test("dtype override combines with projection and headerless input", function()
+  local projected = polars.read_csv(fixture, {
+    columns = { "score", "name" },
+    dtypes = { score = "f32" },
+  })
+  eq(table.concat(projected:columns(), ","), "score,name")
+  eq(projected:schema().score, "f32")
+  eq(projected:schema().name, "str")
+  eq(projected:to_table()[1].score, 10)
+  projected:close()
+
+  local headerless = polars.read_csv(pipe_fixture, {
+    delimiter = "|",
+    header = false,
+    dtypes = { column_1 = "str", column_3 = "f32" },
+  })
+  local schema = headerless:schema()
+  eq(schema.column_1, "str")
+  eq(schema.column_2, "str")
+  eq(schema.column_3, "f32")
+  local rows = headerless:to_table()
+  eq(rows[1].column_1, "1")
+  eq(rows[1].column_3, 10)
+  eq(rows[3].column_3, 30)
+  headerless:close()
+end)
+test("dtype override combines with quote and comment options", function()
+  local df = polars.read_csv(quoted_comments_fixture, {
+    delimiter = "|",
+    header = false,
+    quote = "'",
+    comment = "#",
+    dtypes = { column_3 = "f64" },
+  })
+  eq(df:shape(), 2)
+  eq(df:schema().column_3, "f64")
+  local rows = df:to_table()
+  eq(rows[1].column_2, "ana, a")
+  eq(rows[2].column_3, 20)
+  df:close()
+end)
+test("dtype override rejects invalid values", function()
+  local cases = {
+    { { dtypes = 42 }, "dtypes must be" },
+    { { dtypes = {} }, "must not be empty" },
+    { { dtypes = { [1] = "f64" } }, "keys must be" },
+    { { dtypes = { score = 42 } }, "values must be" },
+    { { dtypes = { score = "" } }, "values must be" },
+    { { dtypes = { score = "decimal" } }, "unsupported CSV dtype" },
+    { { dtypes = { score = "date" } }, "unsupported CSV dtype" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, fixture, case[1])
+    eq(ok, false, "invalid dtype options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+end)
+test("dtype override rejects unknown columns and unparsable values", function()
+  local ok, err = pcall(polars.read_csv, fixture, { dtypes = { missing = "f64" } })
+  eq(ok, false, "dtype override for a missing column accepted")
+  truthy(tostring(err):find("not a column in the file", 1, true),
+    "missing dtype column error: " .. tostring(err))
+
+  ok, err = pcall(polars.read_csv, fixture, {
+    columns = { "name" },
+    dtypes = { score = "f64" },
+  })
+  eq(ok, false, "dtype override outside the projection accepted")
+  truthy(tostring(err):find("not in the projection", 1, true),
+    "unprojected dtype column error: " .. tostring(err))
+
+  ok, err = pcall(polars.read_csv, fixture, { dtypes = { name = "i64" } })
+  eq(ok, false, "unparsable dtype override accepted")
+  truthy(tostring(err):find("parse", 1, true) or
+    tostring(err):find("conversion", 1, true),
+    "dtype parse error: " .. tostring(err))
+end)
 test("select returns chosen columns in order", function()
   local df = polars.read_csv(fixture):select("name", "score")
   local rows, cols = df:shape()
