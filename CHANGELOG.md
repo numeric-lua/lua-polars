@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.0
+
+- `polars.read_csv(path, options)` accepts `null_values`, a literal marker
+  string or a non-empty list of markers that are read as null in every column;
+  markers are compared after surrounding CSV quotes are removed, and empty
+  fields remain null by default;
+- the additive `pl_dataframe_read_csv_null_values` C ABI entry point combines
+  the existing projection and dtype overrides with the null markers; earlier
+  reader entry points keep their signatures and defaults;
+- markers are validated eagerly: an invalid option type, an empty string or
+  list, non-string or empty entries, a list with holes, and duplicate markers
+  are errors;
+- tests cover single and multiple markers, quote/comment/delimiter/headerless
+  combinations, projection and dtype overrides, writer round-trips, and the
+  error paths; the installed-tree smoke test reads markers through both the
+  prefix and LuaRocks layouts;
+- 79 tests.
+
 ## 0.11.0
 
 - `df:write_csv(path, options)` accepts a one-byte `delimiter`, a `header`

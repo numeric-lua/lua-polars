@@ -45,6 +45,12 @@ before. Type inference is Polars' default.
   must be a read column: an override outside `columns` or absent from the file
   is an error. Parsing failures (for example `name = "i64"` on text) are
   reported by Polars.
+- `null_values`: a literal marker string or a non-empty list of markers that
+  are read as null in every column. Markers are compared after surrounding CSV
+  quotes are removed, so a quoted `"NA"` field uses `null_values = "NA"`, not
+  the quotes themselves. Empty fields are null by default. Empty strings,
+  empty lists, non-string entries, lists with holes, and duplicate markers are
+  errors.
 
 `quote` and `comment` must differ from each other and from `delimiter`.
 
@@ -65,12 +71,16 @@ local typed = polars.read_csv("data.csv", {
   columns = { "score", "name" },
   dtypes = { score = "f64" },
 })
+local null_markers = polars.read_csv("data.csv", {
+  null_values = { "NA", "missing" },
+})
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
 collisions, invalid projection names, unsupported or missing dtype overrides,
-a missing or unreadable path, and files that cannot be parsed.
+invalid null-value markers, a missing or unreadable path, and files that cannot
+be parsed.
 
 ### `polars.read_parquet(path) -> DataFrame`
 
@@ -288,6 +298,12 @@ PlFrame *pl_dataframe_read_csv_typed(
     const char *quote, const char *comment,
     const char *const *columns, uint64_t column_count,
     const char *const *dtypes, uint64_t dtype_count, char **err);
+PlFrame *pl_dataframe_read_csv_null_values(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -334,13 +350,23 @@ duration of the call and returns a frame containing only those columns in the
 requested order. A null array or a zero count reads every column; empty,
 duplicate, and unknown names are errors.
 
-`pl_dataframe_read_csv_typed` is the superset entry point. It borrows
-`dtype_count` `column`, `dtype` string pairs (a flat array of
-`2 * dtype_count` names) in addition to the projection. Overrides are applied
-by name after the header is known; `dtype_count` is zero for inference only.
-A null array with a non-zero count is an error. The supported dtype names match
-the Lua option, and a projection that omits an overridden column is rejected.
-The earlier reader signatures and defaults are unchanged.
+`pl_dataframe_read_csv_typed` is the superset entry point for projection and
+dtype overrides. It borrows `dtype_count` `column`, `dtype` string pairs (a
+flat array of `2 * dtype_count` names) in addition to the projection.
+Overrides are applied by name after the header is known; `dtype_count` is zero
+for inference only. A null array with a non-zero count is an error. The
+supported dtype names match the Lua option, and a projection that omits an
+overridden column is rejected. The earlier reader signatures and defaults are
+unchanged.
+
+`pl_dataframe_read_csv_null_values` is additive and combines the full reader
+configuration with literal null markers. It borrows `null_value_count` UTF-8
+strings beyond the typed-reader arguments; a null array or zero count keeps
+Polars' default where only empty fields are null. One marker selects Polars'
+single-value policy and several markers are all interpreted as null. Markers
+are compared with unquoted field bytes, so a quoted `"NA"` field uses the
+marker `NA`. Empty and duplicate markers are errors, as is a null array with a
+non-zero count.
 
 `pl_dataframe_write_csv_options` is additive; `pl_dataframe_write_csv` keeps
 its signature and comma/header/empty-null defaults. A null `delimiter` means
@@ -405,7 +431,8 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] Prefix install and smoke test.
 - [x] CSV reader delimiter and header options.
 - [x] CSV reader quote and comment options.
-- [x] CSV reader column projection.
+- [x] CSV reader column projection and dtype overrides.
+- [x] CSV reader null-value markers.
 - [x] CSV writer delimiter, header, and null-value options.
 - [x] LuaRocks source-rock packaging.
 - [ ] LazyFrame/expressions.

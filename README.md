@@ -32,9 +32,10 @@ end
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
   files, a one-byte `quote` character (or `false` to disable quote parsing),
   a one-byte `comment` prefix (or `false` to disable comment skipping), a
-  `columns` name/list projection returned in the requested order, and a
+  `columns` name/list projection returned in the requested order, a
   `dtypes` table that overrides inferred dtypes by column name (`bool`, `i32`,
-  `i64`, `u32`, `u64`, `f32`, `f64`, `str`)
+  `i64`, `u32`, `u64`, `f32`, `f64`, `str`), and `null_values` as a literal
+  marker string or list of markers applied to every column
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, and a literal `null_value` placeholder for null fields
 - schema, shape, head, ordered columns
@@ -86,14 +87,14 @@ check does not restart the Polars build.
 
 The test suite is dependency-free and covers CSV/Parquet parsing and writing,
 custom CSV delimiters, quote characters, comment prefixes, headerless files,
-read-time column projection and dtype overrides, writer delimiter/header/null
-options, schema, projection, filtering, sorting, grouping, all eager join types,
-column operations, SQL, JSON conversion, and error paths. The smoke test
-installs the module and bridge into a prefix and verifies that
-`require("polars")` finds the bridge without `POLARS_LUA_LIB`. The rockspec
-check validates the release version references, installs the same checkout
-through LuaRocks into the ignored `.luarocks-tree/` directory, and requires it
-from there. A content stamp skips `luarocks make` while the rockspec, Lua
+read-time column projection, dtype overrides, and literal null markers, writer
+delimiter/header/null options, schema, projection, filtering, sorting,
+grouping, all eager join types, column operations, SQL, JSON conversion, and
+error paths. The smoke test installs the module and bridge into a prefix and
+verifies that `require("polars")` finds the bridge without `POLARS_LUA_LIB`.
+The rockspec check validates the release version references, installs the same
+checkout through LuaRocks into the ignored `.luarocks-tree/` directory, and
+requires it from there. A content stamp skips `luarocks make` while the rockspec, Lua
 modules, install script, and native bridge are unchanged, so repeated checks are
 incremental. Set `POLARS_LUA_ROCK_TREE=/path` to use another tree and
 `POLARS_LUA_ROCK_FORCE=1` to force a reinstall. The native bridge itself is
@@ -150,6 +151,7 @@ polars.read_csv(path, {
   comment = "#",
   columns = { "name", "score" },
   dtypes = { score = "f64" },
+  null_values = { "NA", "missing" },
 })
 polars.read_parquet(path)
 
