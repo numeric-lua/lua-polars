@@ -1213,6 +1213,86 @@ pub unsafe extern "C" fn pl_dataframe_read_parquet(
     finish_frame(result, err)
 }
 
+/// Reads an optional Parquet projection from the C ABI.
+///
+/// A null pointer or a zero count leaves the projection disabled. Column names
+/// are borrowed for the duration of the call; empty and duplicate names are
+/// rejected so the caller gets a precise error before Polars touches the file.
+unsafe fn read_parquet_columns(
+    ptr: *const *const c_char,
+    count: u64,
+) -> Result<Option<Vec<String>>, String> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if ptr.is_null() {
+        return Err("Parquet columns are null".to_string());
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| "Parquet column count is too large".to_string())?;
+    let raw = std::slice::from_raw_parts(ptr, count);
+    let mut seen = std::collections::HashSet::new();
+    let mut columns = Vec::with_capacity(count);
+    for (index, &column_ptr) in raw.iter().enumerate() {
+        let column = read_utf8(column_ptr, &format!("Parquet column at index {index}"))?;
+        if column.is_empty() {
+            return Err(format!("Parquet column at index {index} must not be empty"));
+        }
+        if !seen.insert(column.clone()) {
+            return Err(format!("duplicate Parquet column '{column}'"));
+        }
+        columns.push(column);
+    }
+    Ok(Some(columns))
+}
+
+/// Reads a Parquet file with a column projection and a row window.
+///
+/// `columns` points to `column_count` UTF-8 names and is borrowed for the
+/// duration of the call. A null array or a zero count reads every column.
+/// `skip_rows` drops that many leading data rows. `n_rows` limits the data
+/// rows read after the offset: `-1` reads every remaining row and any other
+/// negative value is an error.
+///
+/// This entry point is additive; [`pl_dataframe_read_parquet`] keeps its
+/// signature and reads every row and column.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_parquet_options(
+    path: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let columns = read_parquet_columns(columns, column_count)?;
+        let skip_rows: usize = skip_rows
+            .try_into()
+            .map_err(|_| "Parquet skip_rows is too large".to_string())?;
+        let length = if n_rows < 0 {
+            if n_rows != -1 {
+                return Err(format!(
+                    "Parquet n_rows must be -1 or non-negative, got {n_rows}"
+                ));
+            }
+            usize::MAX - skip_rows
+        } else {
+            usize::try_from(n_rows)
+                .map_err(|_| "Parquet n_rows is too large".to_string())?
+        };
+        let file = File::open(&path).map_err(|error| error.to_string())?;
+        let mut reader = ParquetReader::new(file).with_slice(Some((skip_rows, length)));
+        if let Some(columns) = columns {
+            reader = reader.with_columns(Some(columns));
+        }
+        reader.finish().map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_free(ptr: *mut PlFrame) {
     if !ptr.is_null() {
@@ -1437,9 +1517,10 @@ fn write_csv_frame(df: &DataFrame, path: &str, config: CsvWriteConfig) -> Result
     writer.finish(&mut df).map_err(|error| error.to_string())
 }
 
-unsafe fn finish_write(
+unsafe fn finish_write_with(
     result: std::thread::Result<Result<(), String>>,
     err: *mut *mut c_char,
+    operation: &str,
 ) -> i32 {
     match result {
         Ok(Ok(())) => 0,
@@ -1448,10 +1529,17 @@ unsafe fn finish_write(
             1
         },
         Err(_) => {
-            set_error(err, "write_csv panicked");
+            set_error(err, &format!("{operation} panicked"));
             1
         },
     }
+}
+
+unsafe fn finish_write(
+    result: std::thread::Result<Result<(), String>>,
+    err: *mut *mut c_char,
+) -> i32 {
+    finish_write_with(result, err, "write_csv")
 }
 
 #[no_mangle]
@@ -1537,6 +1625,81 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_full(
     finish_write(result, err)
 }
 
+/// Parses the optional Parquet compression codec name.
+///
+/// A null or empty name keeps Polars' default of Zstd. Names are matched
+/// case-insensitively; `none` is an alias for `uncompressed` and `lz4-raw` is
+/// an alias for `lz4`. The pinned Polars writer always uses the codec's
+/// default compression level, so no level is exposed yet.
+fn parse_parquet_compression(value: Option<&str>) -> Result<ParquetCompression, String> {
+    let value = value.unwrap_or("zstd");
+    match value.to_ascii_lowercase().as_str() {
+        "" | "zstd" => Ok(ParquetCompression::Zstd(None)),
+        "snappy" => Ok(ParquetCompression::Snappy),
+        "gzip" => Ok(ParquetCompression::Gzip(None)),
+        "brotli" => Ok(ParquetCompression::Brotli(None)),
+        "lz4" | "lz4-raw" => Ok(ParquetCompression::Lz4Raw),
+        "uncompressed" | "none" => Ok(ParquetCompression::Uncompressed),
+        other => Err(format!(
+            "unsupported Parquet compression '{other}'; expected zstd, snappy, gzip, brotli, lz4, or uncompressed"
+        )),
+    }
+}
+
+/// Converts an optional positive ABI size into `Option<usize>`.
+///
+/// Zero means "use the Polars default". Any non-zero value must fit in
+/// `usize`; the caller validates that it is a positive integer in Lua terms.
+fn optional_parquet_size(value: u64, label: &str) -> Result<Option<usize>, String> {
+    if value == 0 {
+        return Ok(None);
+    }
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| format!("{label} is too large"))
+}
+
+#[derive(Clone)]
+struct ParquetWriteConfig {
+    compression: ParquetCompression,
+    statistics: StatisticsOptions,
+    row_group_size: Option<usize>,
+    data_page_size: Option<usize>,
+}
+
+impl Default for ParquetWriteConfig {
+    fn default() -> Self {
+        Self {
+            compression: ParquetCompression::default(),
+            statistics: StatisticsOptions::default(),
+            row_group_size: None,
+            data_page_size: None,
+        }
+    }
+}
+
+fn write_parquet_frame(
+    df: &DataFrame,
+    path: &str,
+    config: ParquetWriteConfig,
+) -> Result<(), String> {
+    let file = File::create(path).map_err(|error| error.to_string())?;
+    let mut df = df.clone();
+    let mut writer = ParquetWriter::new(file)
+        .with_compression(config.compression)
+        .with_statistics(config.statistics);
+    if let Some(row_group_size) = config.row_group_size {
+        writer = writer.with_row_group_size(Some(row_group_size));
+    }
+    if let Some(data_page_size) = config.data_page_size {
+        writer = writer.with_data_page_size(Some(data_page_size));
+    }
+    writer
+        .finish(&mut df)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_write_parquet(
     ptr: *mut PlFrame,
@@ -1546,14 +1709,51 @@ pub unsafe extern "C" fn pl_dataframe_write_parquet(
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
         let frame = frame_ref(ptr)?;
         let path = read_path(path)?;
-        let file = File::create(&path).map_err(|error| error.to_string())?;
-        let mut df = frame.df.clone();
-        ParquetWriter::new(file).finish(&mut df).map_err(|error| error.to_string())?;
-        Ok(())
+        write_parquet_frame(&frame.df, &path, ParquetWriteConfig::default())
     }));
-    match result {
-        Ok(Ok(())) => 0,
-        Ok(Err(message)) => { set_error(err, message); 1 }
-        Err(_) => { set_error(err, "write_parquet panicked"); 1 }
-    }
+    finish_write_with(result, err, "write_parquet")
+}
+
+/// Writes a Parquet file with compression, statistics, and chunk-size controls.
+///
+/// A null or empty `compression` keeps the default Zstd; the accepted names
+/// are `zstd`, `snappy`, `gzip`, `brotli`, `lz4`/`lz4-raw`, and
+/// `uncompressed`/`none`, matched case-insensitively. `statistics` is zero to
+/// skip column statistics and non-zero for the Polars defaults. A zero
+/// `row_group_size` or `data_page_size` keeps the Polars default; non-zero
+/// values are row and byte counts respectively.
+///
+/// This entry point is additive; [`pl_dataframe_write_parquet`] keeps its
+/// signature and default Zstd/statistics/chunking behavior.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_parquet_options(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    compression: *const c_char,
+    statistics: i32,
+    row_group_size: u64,
+    data_page_size: u64,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let compression_name = if compression.is_null() {
+            None
+        } else {
+            Some(read_utf8(compression, "compression")?)
+        };
+        let config = ParquetWriteConfig {
+            compression: parse_parquet_compression(compression_name.as_deref())?,
+            statistics: if statistics == 0 {
+                StatisticsOptions::empty()
+            } else {
+                StatisticsOptions::default()
+            },
+            row_group_size: optional_parquet_size(row_group_size, "Parquet row_group_size")?,
+            data_page_size: optional_parquet_size(data_page_size, "Parquet data_page_size")?,
+        };
+        write_parquet_frame(&frame.df, &path, config)
+    }));
+    finish_write_with(result, err, "write_parquet")
 }

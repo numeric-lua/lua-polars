@@ -67,6 +67,9 @@ PlFrame *pl_dataframe_read_csv_named_nulls(
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
+PlFrame *pl_dataframe_read_parquet_options(
+    const char *path, const char *const *columns, uint64_t column_count,
+    uint64_t skip_rows, int64_t n_rows, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
@@ -87,6 +90,10 @@ int pl_dataframe_write_csv_full(
     int32_t has_header, const char *null_value,
     const char *line_terminator, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
+int pl_dataframe_write_parquet_options(
+    PlFrame *frame, const char *path, const char *compression,
+    int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
+    char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ]]
@@ -383,6 +390,76 @@ local function quote_identifier(name)
   return '"' .. tostring(name):gsub('"', '""') .. '"'
 end
 
+local MAX_SAFE_INTEGER = 9007199254740991
+
+local PARQUET_WRITE_OPTION_KEYS = {
+  compression = true,
+  statistics = true,
+  row_group_size = true,
+  data_page_size = true,
+}
+
+-- The ABI accepts these names case-insensitively; `none`/`lz4-raw` are
+-- readability aliases and map to the same Polars codec.
+local PARQUET_COMPRESSION_ALIASES = {
+  zstd = "zstd",
+  snappy = "snappy",
+  gzip = "gzip",
+  brotli = "brotli",
+  lz4 = "lz4",
+  ["lz4-raw"] = "lz4",
+  uncompressed = "uncompressed",
+  none = "uncompressed",
+}
+
+-- Zero is the ABI sentinel for "use the Polars default", so Lua only accepts
+-- an explicit positive integer. Row group sizes are row counts and data page
+-- sizes are byte counts.
+local function parquet_size_option(options, key)
+  local value = options[key]
+  if value == nil then
+    return 0
+  end
+  if type(value) ~= "number" or value < 1 or value % 1 ~= 0 or
+      value > MAX_SAFE_INTEGER then
+    error("write_parquet " .. key .. " must be a positive integer", 3)
+  end
+  return value
+end
+
+local function write_parquet_options(options)
+  if type(options) ~= "table" then
+    error("write_parquet options must be a table", 3)
+  end
+  for key in pairs(options) do
+    if not PARQUET_WRITE_OPTION_KEYS[key] then
+      error("write_parquet options: unknown field '" .. tostring(key) .. "'", 3)
+    end
+  end
+  local compression = options.compression
+  if compression == nil then
+    compression = "zstd"
+  end
+  if type(compression) ~= "string" or compression == "" then
+    error("write_parquet compression must be a non-empty string", 3)
+  end
+  local canonical = PARQUET_COMPRESSION_ALIASES[compression:lower()]
+  if canonical == nil then
+    error("write_parquet compression must be one of zstd, snappy, gzip, " ..
+      "brotli, lz4, or uncompressed", 3)
+  end
+  local statistics = options.statistics
+  if statistics == nil then
+    statistics = true
+  end
+  if type(statistics) ~= "boolean" then
+    error("write_parquet statistics must be a boolean", 3)
+  end
+  return canonical, statistics,
+    parquet_size_option(options, "row_group_size"),
+    parquet_size_option(options, "data_page_size")
+end
+
 function DataFrame:unique()
   return self:sql("SELECT DISTINCT * FROM df")
 end
@@ -439,7 +516,24 @@ function DataFrame:write_csv(path, options)
   end
   return self
 end
-function DataFrame:write_parquet(path) return write_frame(self, path, "pl_dataframe_write_parquet") end
+function DataFrame:write_parquet(path, options)
+  if options == nil then
+    return write_frame(self, path, "pl_dataframe_write_parquet")
+  end
+  if type(path) ~= "string" or path == "" then
+    error("write_parquet path must be a string", 2)
+  end
+  local compression, statistics, row_group_size, data_page_size =
+    write_parquet_options(options)
+  local err = ffi.new("char *[1]")
+  local status = lib.pl_dataframe_write_parquet_options(self:_require_open(),
+    path, compression, statistics and 1 or 0, row_group_size, data_page_size,
+    err)
+  if status ~= 0 then
+    error(take_error(err), 2)
+  end
+  return self
+end
 
 function DataFrame:to_json()
   local err = ffi.new("char *[1]")
@@ -696,7 +790,8 @@ local function csv_byte_option(options, key, default)
   return value
 end
 
-local function csv_columns(value)
+local function column_projection(value, label)
+  label = label or "read_csv"
   if value == nil then
     return nil
   end
@@ -706,27 +801,31 @@ local function csv_columns(value)
   elseif type(value) == "table" then
     columns = value
   else
-    error("read_csv columns must be a column name or a list of names", 3)
+    error(label .. " columns must be a column name or a list of names", 3)
   end
   if #columns == 0 then
-    error("read_csv columns must not be empty", 3)
+    error(label .. " columns must not be empty", 3)
   end
   local seen = {}
   local result = {}
   for index, name in ipairs(columns) do
     if type(name) ~= "string" or name == "" then
-      error("read_csv columns entries must be non-empty strings", 3)
+      error(label .. " columns entries must be non-empty strings", 3)
     end
     if seen[name] then
-      error("duplicate read_csv column '" .. name .. "'", 3)
+      error("duplicate " .. label .. " column '" .. name .. "'", 3)
     end
     seen[name] = true
     result[index] = name
   end
   if #result == 0 then
-    error("read_csv columns must not be empty", 3)
+    error(label .. " columns must not be empty", 3)
   end
   return result
+end
+
+local function csv_columns(value)
+  return column_projection(value, "read_csv")
 end
 
 -- Flattens the `dtypes` map into the ABI's column/dtype string pairs.
@@ -906,13 +1005,13 @@ local function csv_encoding(value)
   error("read_csv encoding must be 'utf8' or 'utf8-lossy'", 3)
 end
 
--- Polars' row window counts are CSV rows, not Lua table indices: skip_rows
--- drops rows before the header is parsed, while n_rows limits data rows after
--- it. Both are non-negative safe integers. An absent n_rows becomes the ABI's
--- -1 sentinel for "read every remaining row".
-local CSV_MAX_SAFE_INTEGER = 9007199254740991
-
-local function csv_row_window(options)
+-- Polars' row window counts are rows, not Lua table indices. For CSV,
+-- skip_rows drops rows before the header is parsed; for Parquet it drops
+-- leading data rows. In both cases n_rows limits the data rows after the
+-- offset. Both are non-negative safe integers, and an absent n_rows becomes
+-- the ABI's -1 sentinel for "read every remaining row".
+local function row_window(options, label)
+  label = label or "read_csv"
   if options == nil then
     return 0, -1, false
   end
@@ -920,18 +1019,22 @@ local function csv_row_window(options)
   local skip_rows = options.skip_rows
   if skip_rows == nil then skip_rows = 0 end
   if type(skip_rows) ~= "number" or skip_rows < 0 or skip_rows % 1 ~= 0 or
-      skip_rows > CSV_MAX_SAFE_INTEGER then
-    error("read_csv skip_rows must be a non-negative integer", 3)
+      skip_rows > MAX_SAFE_INTEGER then
+    error(label .. " skip_rows must be a non-negative integer", 3)
   end
   local n_rows = options.n_rows
   if n_rows == nil then
     return skip_rows, -1, requested
   end
   if type(n_rows) ~= "number" or n_rows < 0 or n_rows % 1 ~= 0 or
-      n_rows > CSV_MAX_SAFE_INTEGER then
-    error("read_csv n_rows must be a non-negative integer", 3)
+      n_rows > MAX_SAFE_INTEGER then
+    error(label .. " n_rows must be a non-negative integer", 3)
   end
   return skip_rows, n_rows, requested
+end
+
+local function csv_row_window(options)
+  return row_window(options, "read_csv")
 end
 
 local function csv_options(options)
@@ -1058,12 +1161,49 @@ function polars.read_csv(path, options)
   return new_frame(pointer, err)
 end
 
-function polars.read_parquet(path)
+local PARQUET_READ_OPTION_KEYS = {
+  columns = true,
+  skip_rows = true,
+  n_rows = true,
+}
+
+local function parquet_read_options(options)
+  if options == nil then
+    return nil, 0, -1, false
+  end
+  if type(options) ~= "table" then
+    error("read_parquet options must be a table", 3)
+  end
+  for key in pairs(options) do
+    if not PARQUET_READ_OPTION_KEYS[key] then
+      error("read_parquet options: unknown field '" .. tostring(key) .. "'", 3)
+    end
+  end
+  local columns = column_projection(options.columns, "read_parquet")
+  local skip_rows, n_rows, requested = row_window(options, "read_parquet")
+  return columns, skip_rows, n_rows, requested or columns ~= nil
+end
+
+function polars.read_parquet(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_parquet path must be a non-empty string", 2)
   end
+  local columns, skip_rows, n_rows, requested = parquet_read_options(options)
   local err = ffi.new("char *[1]")
-  local pointer = lib.pl_dataframe_read_parquet(path, err)
+  local pointer
+  if not requested then
+    pointer = lib.pl_dataframe_read_parquet(path, err)
+  else
+    local names
+    if columns ~= nil then
+      names = ffi.new("const char *[?]", #columns)
+      for index, name in ipairs(columns) do
+        names[index - 1] = name
+      end
+    end
+    pointer = lib.pl_dataframe_read_parquet_options(path, names,
+      names and #columns or 0, skip_rows, n_rows, err)
+  end
   return new_frame(pointer, err)
 end
 
