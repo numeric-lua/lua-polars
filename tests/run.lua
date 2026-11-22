@@ -1174,8 +1174,9 @@ test("join requires an open DataFrame and valid options", function()
 end)
 
 current = "parquet"
+local sample_parquet = root .. "/tests/fixtures/sample.parquet"
 test("reads a Parquet file", function()
-  local parquet = root .. "/tests/fixtures/sample.parquet"
+  local parquet = sample_parquet
   local f = io.open(parquet, "rb")
   if f == nil then
     error("sample.parquet is missing; run examples/make_parquet.rs")
@@ -1184,6 +1185,87 @@ test("reads a Parquet file", function()
   local df = polars.read_parquet(parquet)
   eq(df:shape(), 5)
   df:close()
+end)
+test("Parquet reader projects columns in the requested order", function()
+  local df = polars.read_parquet(sample_parquet, {
+    columns = { "score", "name" },
+  })
+  eq(df:shape(), 5)
+  eq(table.concat(df:columns(), ","), "score,name")
+  eq(df:schema().score, "i64")
+  eq(df:schema().name, "str")
+  local rows = df:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].score, 10)
+  df:close()
+
+  local single = polars.read_parquet(sample_parquet, { columns = "team" })
+  eq(table.concat(single:columns(), ","), "team")
+  eq(select(2, single:shape()), 1)
+  single:close()
+end)
+test("Parquet reader applies a row window", function()
+  local df = polars.read_parquet(sample_parquet, { skip_rows = 1, n_rows = 2 })
+  eq(df:shape(), 2)
+  local rows = df:to_table()
+  eq(rows[1].name, "bia")
+  eq(rows[1].score, 7)
+  eq(rows[2].name, "caio")
+  eq(rows[2].score, 12)
+  df:close()
+
+  local limited = polars.read_parquet(sample_parquet, {
+    columns = { "name", "score" },
+    skip_rows = 2,
+    n_rows = 2,
+  })
+  eq(limited:shape(), 2)
+  eq(table.concat(limited:columns(), ","), "name,score")
+  eq(limited:to_table()[2].name, "duda")
+  limited:close()
+
+  local empty = polars.read_parquet(sample_parquet, { n_rows = 0 })
+  eq(empty:shape(), 0)
+  eq(#empty:columns(), 4)
+  empty:close()
+
+  local past = polars.read_parquet(sample_parquet, {
+    skip_rows = 99,
+    n_rows = 2,
+  })
+  eq(past:shape(), 0)
+  eq(#past:columns(), 4)
+  past:close()
+end)
+test("Parquet reader rejects malformed options", function()
+  local cases = {
+    { 42, "options must be a table" },
+    { { rows = 1 }, "unknown field 'rows'" },
+    { { columns = {} }, "must not be empty" },
+    { { columns = 42 }, "columns must be" },
+    { { columns = { 42 } }, "entries must be" },
+    { { columns = { "" } }, "entries must be" },
+    { { columns = { "name", "name" } }, "duplicate" },
+    { { columns = { "missing" } }, "missing" },
+    { { skip_rows = -1 }, "skip_rows must be" },
+    { { skip_rows = 1.5 }, "skip_rows must be" },
+    { { skip_rows = "1" }, "skip_rows must be" },
+    { { n_rows = -1 }, "n_rows must be" },
+    { { n_rows = 1.5 }, "n_rows must be" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_parquet, sample_parquet, case[1])
+    eq(ok, false, "invalid Parquet reader options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+end)
+test("missing Parquet file is an error", function()
+  local ok, err = pcall(polars.read_parquet,
+    root .. "/tests/fixtures/missing.parquet")
+  eq(ok, false)
+  truthy(tostring(err):find("No such file") or tostring(err):find("os error"),
+    "missing Parquet file error")
 end)
 
 current = "writers"
@@ -1220,6 +1302,93 @@ test("Parquet writer round-trips quoted strings, nulls, and schema", function()
   check_roundtrip_frame(loaded)
   loaded:close()
   df:close()
+end)
+test("Parquet writer accepts every compression codec", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".parquet")
+  for _, codec in ipairs({
+    "zstd", "snappy", "gzip", "brotli", "lz4", "uncompressed",
+  }) do
+    eq(df:write_parquet(out, { compression = codec }), df,
+      codec .. " return value")
+    local loaded = polars.read_parquet(out)
+    check_roundtrip_frame(loaded)
+    loaded:close()
+  end
+  for _, alias in ipairs({ "ZSTD", "lz4-raw", "None" }) do
+    df:write_parquet(out, { compression = alias })
+    local loaded = polars.read_parquet(out)
+    check_roundtrip_frame(loaded)
+    loaded:close()
+  end
+  df:close()
+end)
+test("Parquet writer options control statistics and chunk sizes", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".parquet")
+  eq(df:write_parquet(out, {
+    compression = "snappy",
+    statistics = false,
+    row_group_size = 1,
+    data_page_size = 64,
+  }), df, "write_parquet options return value")
+  local loaded = polars.read_parquet(out)
+  check_roundtrip_frame(loaded)
+  loaded:close()
+
+  df:write_parquet(out, {
+    statistics = true,
+    row_group_size = 3,
+    data_page_size = 4096,
+  })
+  loaded = polars.read_parquet(out)
+  check_roundtrip_frame(loaded)
+  loaded:close()
+  df:close()
+end)
+test("Parquet writer rejects malformed options", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local cases = {
+    { 42, "options must be a table" },
+    { { level = 3 }, "unknown field 'level'" },
+    { { compression = 42 }, "compression must be" },
+    { { compression = "" }, "compression must be" },
+    { { compression = "lzo" }, "compression must be one of" },
+    { { statistics = 0 }, "statistics must be a boolean" },
+    { { row_group_size = 0 }, "row_group_size must be a positive integer" },
+    { { row_group_size = -1 }, "row_group_size must be a positive integer" },
+    { { row_group_size = 1.5 }, "row_group_size must be a positive integer" },
+    { { row_group_size = "2" }, "row_group_size must be a positive integer" },
+    { { data_page_size = 0 }, "data_page_size must be a positive integer" },
+    { { data_page_size = 1.5 }, "data_page_size must be a positive integer" },
+  }
+  for _, case in ipairs(cases) do
+    local out = new_temp_path(".parquet")
+    local ok, err = pcall(function() df:write_parquet(out, case[1]) end)
+    eq(ok, false, "invalid Parquet writer options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+end)
+test("Parquet writer options reject closed frames and bad paths", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  df:close()
+  local ok, err = pcall(function()
+    df:write_parquet(new_temp_path(".parquet"), { compression = "snappy" })
+  end)
+  eq(ok, false)
+  truthy(tostring(err):find("closed"), "closed-frame error")
+
+  local live = polars.read_csv(roundtrip_fixture)
+  ok, err = pcall(function()
+    live:write_parquet(root .. "/tests/fixtures/missing-dir/out.parquet",
+      { compression = "snappy" })
+  end)
+  eq(ok, false)
+  truthy(tostring(err):find("No such file") or tostring(err):find("os error"),
+    "filesystem error")
+  live:close()
 end)
 test("CSV writer options round-trip delimiter and null value", function()
   local df = polars.read_csv(roundtrip_fixture)

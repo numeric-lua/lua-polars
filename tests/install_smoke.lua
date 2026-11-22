@@ -163,6 +163,32 @@ check(crlf_loaded:to_table()[3].note == "NA", "CRLF round-trip mismatch")
 crlf_loaded:close()
 os.remove(crlf_written)
 
+local parquet_out = os.tmpname()
+os.remove(parquet_out)
+writer:write_parquet(parquet_out, {
+  compression = "snappy",
+  statistics = false,
+  row_group_size = 2,
+  data_page_size = 1024,
+})
+local parquet = polars.read_parquet(parquet_out, {
+  columns = { "note", "id" },
+  skip_rows = 1,
+  n_rows = 1,
+})
+check(parquet:shape() == 1, "unexpected Parquet window shape")
+check(table.concat(parquet:columns(), ",") == "note,id",
+  "unexpected Parquet column order")
+check(parquet:to_table()[1].id == 2, "unexpected Parquet row value")
+check(parquet:to_table()[1].note == 'say "hi"',
+  "unexpected Parquet note value")
+parquet:close()
+local bad_compression = pcall(function()
+  writer:write_parquet(parquet_out, { compression = "lzo" })
+end)
+check(bad_compression == false, "invalid Parquet compression accepted")
+os.remove(parquet_out)
+
 writer:close()
 os.remove(written)
 
