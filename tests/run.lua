@@ -612,6 +612,148 @@ test("row window rejects invalid values", function()
       "expected integer guidance in: " .. tostring(err))
   end
 end)
+test("rename_columns replaces leading column names positionally", function()
+  local df = polars.read_csv(fixture, {
+    rename_columns = { "who", "squad", "points", "enabled" },
+  })
+  eq(df:shape(), 5)
+  eq(table.concat(df:columns(), ","), "who,squad,points,enabled")
+  local schema = df:schema()
+  eq(schema.who, "str")
+  eq(schema.points, "i64")
+  eq(schema.enabled, "bool")
+  local rows = df:to_table()
+  eq(rows[1].who, "ana")
+  eq(rows[1].points, 10)
+  eq(rows[5].squad, "red")
+  df:close()
+end)
+test("rename_columns renames a prefix and works with headerless input", function()
+  local df = polars.read_csv(pipe_fixture, {
+    delimiter = "|",
+    header = false,
+    rename_columns = { "id", "who" },
+  })
+  eq(df:shape(), 3)
+  eq(table.concat(df:columns(), ","), "id,who,column_3")
+  local rows = df:to_table()
+  eq(rows[1].id, 1)
+  eq(rows[1].who, "ana")
+  eq(rows[1].column_3, 10)
+  eq(rows[3].who, "caio")
+  df:close()
+end)
+test("rename_columns combines with projection, dtype overrides, null markers, and a row window", function()
+  local df = polars.read_csv(null_fixture, {
+    columns = { "score", "note" },
+    dtypes = { score = "f64" },
+    null_values = { "NA", "9" },
+    skip_rows = 0,
+    n_rows = 3,
+    rename_columns = { "points", "label" },
+  })
+  eq(df:shape(), 3)
+  eq(table.concat(df:columns(), ","), "points,label")
+  eq(df:schema().points, "f64")
+  local rows = df:to_table()
+  eq(rows[1].points, 10)
+  eq(rows[1].label, polars.null)
+  eq(rows[2].label, "missing")
+  eq(rows[3].points, 30)
+  eq(rows[3].label, polars.null)
+  df:close()
+end)
+test("rename_columns rejects invalid values", function()
+  local cases = {
+    { "who", "non-empty list" },
+    { 42, "non-empty list" },
+    { true, "non-empty list" },
+    { {}, "must not be empty" },
+    { { who = "x" }, "non-empty list" },
+    { { [1] = "a", [3] = "c" }, "contiguous" },
+    { { 42 }, "entries must be non-empty strings" },
+    { { "" }, "entries must be non-empty strings" },
+    { { "a", "a" }, "duplicate read_csv column name 'a'" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, fixture, { rename_columns = case[1] })
+    eq(ok, false, "invalid rename_columns accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(polars.read_csv, fixture, {
+    rename_columns = { "a", "b", "c", "d", "e" },
+  })
+  eq(ok, false, "too many rename_columns accepted")
+  truthy(tostring(err):find("frame has 4 columns", 1, true),
+    "rename width error: " .. tostring(err))
+  ok, err = pcall(polars.read_csv, fixture, { rename_columns = { "team" } })
+  eq(ok, false, "rename collision accepted")
+  truthy(tostring(err):find("duplicate CSV column name 'team'", 1, true),
+    "rename collision error: " .. tostring(err))
+end)
+test("encoding stays strict UTF-8 by default", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "wb"))
+  file:write("name,note\nana,caf\233\n")
+  file:close()
+  local ok, err = pcall(polars.read_csv, path)
+  eq(ok, false, "invalid UTF-8 accepted by default")
+  truthy(tostring(err):lower():find("utf", 1, true),
+    "strict encoding error: " .. tostring(err))
+  ok, err = pcall(polars.read_csv, path, { encoding = "utf8" })
+  eq(ok, false, "explicit strict encoding accepted invalid bytes")
+  truthy(tostring(err):lower():find("utf", 1, true),
+    "explicit strict encoding error: " .. tostring(err))
+end)
+test("encoding utf8-lossy replaces invalid bytes", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "wb"))
+  file:write("name,note\nana,caf\233\n")
+  file:close()
+  local df = polars.read_csv(path, { encoding = "utf8-lossy" })
+  eq(df:shape(), 1)
+  eq(df:schema().note, "str")
+  eq(df:to_table()[1].note, "caf\239\191\189")
+  df:close()
+  local upper = polars.read_csv(path, { encoding = "UTF8-LOSSY" })
+  eq(upper:to_table()[1].note, "caf\239\191\189")
+  upper:close()
+end)
+test("encoding combines with projection, null markers, rename_columns, and row limits", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "wb"))
+  file:write("id,note,score\n1,caf\233,10\n2,ok,20\n3,na\255,30\n")
+  file:close()
+  local df = polars.read_csv(path, {
+    encoding = "utf8-lossy",
+    columns = { "note", "score" },
+    dtypes = { score = "f64" },
+    null_values = "ok",
+    n_rows = 2,
+    rename_columns = { "label", "points" },
+  })
+  eq(df:shape(), 2)
+  eq(table.concat(df:columns(), ","), "label,points")
+  eq(df:schema().points, "f64")
+  local rows = df:to_table()
+  eq(rows[1].label, "caf\239\191\189")
+  eq(rows[1].points, 10)
+  eq(rows[2].label, polars.null)
+  eq(rows[2].points, 20)
+  df:close()
+end)
+test("encoding rejects unsupported values", function()
+  local cases = { 42, true, "", "latin1", "utf-16", "lossy", {} }
+  for _, value in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, fixture, { encoding = value })
+    eq(ok, false, "invalid encoding accepted")
+    truthy(tostring(err):find("encoding", 1, true),
+      "encoding error: " .. tostring(err))
+    truthy(tostring(err):find("utf8", 1, true),
+      "encoding guidance: " .. tostring(err))
+  end
+end)
 test("select returns chosen columns in order", function()
   local df = polars.read_csv(fixture):select("name", "score")
   local rows, cols = df:shape()
@@ -1035,6 +1177,45 @@ test("CSV writer header option writes headerless output", function()
   loaded:close()
   df:close()
 end)
+test("CSV writer line_terminator writes CRLF records", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  eq(df:write_csv(out, { line_terminator = "\r\n" }), df,
+    "write_csv CRLF return value")
+  local raw = read_file(out)
+  truthy(raw:find("id,name,note\r\n", 1, true), "CRLF header")
+  truthy(raw:find("3,caio,\r\n", 1, true), "CRLF null record")
+  local bare = raw:gsub("\r\n", "")
+  truthy(not bare:find("\r", 1, true) and not bare:find("\n", 1, true),
+    "lone record separator in CRLF output")
+  local loaded = polars.read_csv(out)
+  check_roundtrip_frame(loaded)
+  loaded:close()
+  df:close()
+end)
+test("CSV writer line_terminator combines with delimiter, header, and null_value", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  df:write_csv(out, {
+    delimiter = ";",
+    header = false,
+    null_value = "NA",
+    line_terminator = "\r\n",
+  })
+  local raw = read_file(out)
+  truthy(raw:find("1;ana;hello, world\r\n", 1, true),
+    "CRLF quoted record")
+  truthy(raw:find("3;caio;NA\r\n", 1, true), "CRLF null placeholder")
+  truthy(not raw:gsub("\r\n", ""):find("[\r\n]"),
+    "lone record separator in combined CRLF output")
+  local loaded = polars.read_csv(out, { delimiter = ";", header = false })
+  eq(loaded:shape(), 3)
+  local rows = loaded:to_table()
+  eq(rows[1].column_2, "ana")
+  eq(rows[3].column_3, "NA")
+  loaded:close()
+  df:close()
+end)
 test("CSV writer defaults stay comma, header, and empty null", function()
   local df = polars.read_csv(roundtrip_fixture)
   local out = new_temp_path(".csv")
@@ -1061,6 +1242,12 @@ test("CSV writer rejects invalid options", function()
     { { null_value = "a\0b" }, "null_value" },
     { { delimiter = ";", null_value = "a;b" }, "null_value" },
     { { null_value = '"' }, "null_value" },
+    { { line_terminator = 42 }, "line_terminator must be a string" },
+    { { line_terminator = "" }, "line_terminator" },
+    { { line_terminator = "\r" }, "line_terminator" },
+    { { line_terminator = "\n\n" }, "line_terminator" },
+    { { line_terminator = "x" }, "line_terminator" },
+    { { line_terminator = "\0" }, "line_terminator" },
   }
   for _, case in ipairs(cases) do
     local ok, err = pcall(function()

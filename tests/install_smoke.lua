@@ -82,6 +82,27 @@ local skipped = polars.read_csv(fixture, {
 check(skipped:to_table()[1].column_1 == "bia", "skip_rows mismatch")
 skipped:close()
 
+local renamed = polars.read_csv(fixture, {
+  rename_columns = { "who", "squad", "points", "enabled" },
+})
+check(table.concat(renamed:columns(), ",") == "who,squad,points,enabled",
+  "unexpected renamed columns")
+check(renamed:schema().points == "i64", "unexpected renamed dtype")
+check(renamed:to_table()[1].who == "ana", "unexpected renamed value")
+renamed:close()
+
+local lossy_path = os.tmpname()
+local lossy_file = assert(io.open(lossy_path, "wb"))
+lossy_file:write("name,note\nana,caf\233\n")
+lossy_file:close()
+local strict_ok = pcall(polars.read_csv, lossy_path)
+check(strict_ok == false, "invalid UTF-8 accepted without lossy encoding")
+local lossy = polars.read_csv(lossy_path, { encoding = "utf8-lossy" })
+check(lossy:to_table()[1].note == "caf\239\191\189",
+  "lossy replacement mismatch")
+lossy:close()
+os.remove(lossy_path)
+
 local roundtrip_fixture = fixture:gsub("sample%.csv$", "roundtrip.csv")
 local written = os.tmpname()
 os.remove(written)
@@ -109,6 +130,23 @@ local nulled_writer = polars.read_csv(written, {
 check(nulled_writer:to_table()[3].column_3 == polars.null,
   "null placeholder did not read back as null")
 nulled_writer:close()
+
+local crlf_written = os.tmpname()
+os.remove(crlf_written)
+writer:write_csv(crlf_written, { line_terminator = "\r\n", null_value = "NA" })
+handle = assert(io.open(crlf_written, "rb"))
+raw = handle:read("*a")
+handle:close()
+check(raw:find("id,name,note\r\n", 1, true) ~= nil, "CRLF header mismatch")
+check(raw:find("3,caio,NA\r\n", 1, true) ~= nil, "CRLF null record mismatch")
+local bare = raw:gsub("\r\n", "")
+check(not bare:find("[\r\n]"), "CRLF output has a lone separator")
+local crlf_loaded = polars.read_csv(crlf_written)
+check(crlf_loaded:shape() == 3, "unexpected CRLF round-trip shape")
+check(crlf_loaded:to_table()[3].note == "NA", "CRLF round-trip mismatch")
+crlf_loaded:close()
+os.remove(crlf_written)
+
 writer:close()
 os.remove(written)
 
