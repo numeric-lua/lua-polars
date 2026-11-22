@@ -66,12 +66,18 @@ Polars' default.
   must be a read column: an override outside `columns` or absent from the file
   is an error. Parsing failures (for example `name = "i64"` on text) are
   reported by Polars.
-- `null_values`: a literal marker string or a non-empty list of markers that
-  are read as null in every column. Markers are compared after surrounding CSV
-  quotes are removed, so a quoted `"NA"` field uses `null_values = "NA"`, not
-  the quotes themselves. Empty fields are null by default. Empty strings,
-  empty lists, non-string entries, lists with holes, and duplicate markers are
-  errors.
+- `null_values`: null markers, either a literal marker string or a non-empty
+  list of markers applied to every column, or a table mapping column names to
+  one marker each. Per-column markers are read as null only in their own
+  column, while empty fields remain null in every column. Markers are compared
+  after surrounding CSV quotes are removed, so a quoted `"NA"` field uses
+  `null_values = "NA"`, not the quotes themselves. Empty strings, empty lists,
+  non-string entries, lists with holes, duplicate list markers, mixed list and
+  column keys, empty column names, and non-string or empty per-column markers
+  are errors. A per-column marker outside `columns` is rejected before the
+  read, and a marker column absent from the file is reported by Polars.
+  Per-column markers name the file's original columns because they are applied
+  before `rename_columns`.
 
 `quote` and `comment` must differ from each other and from `delimiter`.
 
@@ -95,6 +101,9 @@ local typed = polars.read_csv("data.csv", {
 local null_markers = polars.read_csv("data.csv", {
   null_values = { "NA", "missing" },
 })
+local scoped_nulls = polars.read_csv("data.csv", {
+  null_values = { note = "NA", score = "9" },
+})
 local window = polars.read_csv("export.csv", {
   skip_rows = 2,
   n_rows = 100,
@@ -109,7 +118,7 @@ local lossy = polars.read_csv("legacy.csv", { encoding = "utf8-lossy" })
 Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
 collisions, invalid projection names, unsupported or missing dtype overrides,
-invalid null-value markers, invalid rename lists, unsupported encodings,
+invalid or per-column null-value markers, invalid rename lists, unsupported encodings,
 negative or fractional row-window counts, a missing or unreadable path, and
 files that cannot be parsed.
 
@@ -362,6 +371,16 @@ PlFrame *pl_dataframe_read_csv_renamed(
     uint64_t skip_rows, int64_t n_rows,
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, char **err);
+PlFrame *pl_dataframe_read_csv_named_nulls(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_columns, const char *const *null_values,
+    uint64_t null_value_count,
+    uint64_t skip_rows, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -453,6 +472,16 @@ projection and dtype overrides. Fewer names than columns renames only that
 prefix; more names than columns, empty names, and duplicate resulting names are
 errors. The encoding argument follows `pl_dataframe_read_csv_encoded`.
 
+`pl_dataframe_read_csv_named_nulls` is additive and combines every earlier
+reader option, including the encoding and positional renames, with per-column
+null markers. `null_columns` and `null_values` are parallel arrays of
+`null_value_count` UTF-8 strings: each named column gets exactly one marker,
+and columns without an entry keep Polars' default where only empty fields are
+null. Empty names or markers and duplicate columns are errors. A marker column
+outside the projection is rejected, and a marker column absent from the file is
+reported by Polars. Markers are applied before positional renames, so they name
+the file's original columns, like dtype overrides.
+
 `pl_dataframe_write_csv_options` is additive; `pl_dataframe_write_csv` keeps
 its signature and comma/header/empty-null defaults. A null `delimiter` means
 `","`; `has_header` is zero to omit the header row. A null or empty
@@ -524,6 +553,7 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV reader quote and comment options.
 - [x] CSV reader column projection and dtype overrides.
 - [x] CSV reader null-value markers.
+- [x] CSV reader per-column null-value markers.
 - [x] CSV reader row windows (`skip_rows`, `n_rows`).
 - [x] CSV reader positional column renaming and UTF-8 lossy decoding.
 - [x] CSV writer delimiter, header, and null-value options.

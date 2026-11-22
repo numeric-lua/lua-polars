@@ -36,8 +36,9 @@ end
   `rename_columns` positional name list, a `dtypes` table that overrides
   inferred dtypes by column name (`bool`, `i32`, `i64`, `u32`, `u64`, `f32`,
   `f64`, `str`), `null_values` as a literal marker string or list of markers
-  applied to every column, a `skip_rows`/`n_rows` window over the rows before
-  and after the header, and `encoding = "utf8-lossy"` for invalid UTF-8 input
+  applied to every column, or a table mapping column names to one marker each,
+  a `skip_rows`/`n_rows` window over the rows before and after the header, and
+  `encoding = "utf8-lossy"` for invalid UTF-8 input
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, a literal `null_value` placeholder for null fields, and a
   `line_terminator` of `"\n"` or `"\r\n"`
@@ -91,7 +92,8 @@ check does not restart the Polars build.
 The test suite is dependency-free and covers CSV/Parquet parsing and writing,
 custom CSV delimiters, quote characters, comment prefixes, headerless files,
 read-time column projection, positional column renaming, dtype overrides,
-literal null markers, UTF-8 lossy decoding, and skip-rows/row-limit windows,
+literal and per-column null markers, UTF-8 lossy decoding, and
+skip-rows/row-limit windows,
 writer delimiter/header/null/line-terminator options, schema, projection,
 filtering, sorting, grouping, all eager join types, column operations, SQL,
 JSON conversion, and error paths. The smoke test installs the module and bridge
@@ -161,6 +163,9 @@ polars.read_csv(path, {
   encoding = "utf8-lossy",
   skip_rows = 1,
   n_rows = 100,
+})
+polars.read_csv(path, {
+  null_values = { note = "NA", score = "9" },
 })
 polars.read_parquet(path)
 

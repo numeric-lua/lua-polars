@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- `polars.read_csv(path, options)` accepts `null_values` as a table mapping
+  column names to one marker each; named markers are read as null only in
+  their own column, while empty fields remain null in every column, and the
+  map composes with projection, dtype overrides, positional renames, the row
+  window, and UTF-8 lossy decoding;
+- the additive `pl_dataframe_read_csv_named_nulls` C ABI entry point combines
+  every earlier reader option, including the encoding and positional rename
+  list, with parallel `null_columns`/`null_values` arrays; earlier reader
+  entry points keep their signatures and defaults;
+- malformed per-column maps (mixed list and column keys, non-string keys,
+  empty column names, and non-string or empty markers), markers outside the
+  projection, and markers naming columns absent from the file are rejected
+  with explicit Lua errors;
+- tests cover per-column scoping, empty-field nulls, combinations with
+  projection/dtypes/renames/row windows/lossy decoding, malformed maps, a
+  marker outside the projection, and an unknown marker column; the
+  installed-tree smoke test exercises per-column markers through both the
+  prefix and LuaRocks layouts;
+- 99 tests.
+
 ## 0.14.0
 
 - `polars.read_csv(path, options)` accepts `rename_columns`, a non-empty,
