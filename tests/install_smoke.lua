@@ -58,6 +58,30 @@ check(nulled_rows[2].score == polars.null, "7 was not read as null")
 check(nulled_rows[3].score == 12, "unmatched score changed")
 nulled:close()
 
+local windowed = polars.read_csv(fixture, {
+  columns = { "score", "name" },
+  dtypes = { score = "f64" },
+  null_values = "10",
+  skip_rows = 0,
+  n_rows = 2,
+})
+check(windowed:shape() == 2, "unexpected row-window shape")
+check(table.concat(windowed:columns(), ",") == "score,name",
+  "unexpected row-window column order")
+check(windowed:schema().score == "f64", "unexpected row-window dtype")
+local windowed_rows = windowed:to_table()
+check(windowed_rows[1].score == polars.null, "row-window null marker mismatch")
+check(windowed_rows[2].score == 7, "row-window value mismatch")
+windowed:close()
+
+local skipped = polars.read_csv(fixture, {
+  header = false,
+  skip_rows = 2,
+  n_rows = 1,
+})
+check(skipped:to_table()[1].column_1 == "bia", "skip_rows mismatch")
+skipped:close()
+
 local roundtrip_fixture = fixture:gsub("sample%.csv$", "roundtrip.csv")
 local written = os.tmpname()
 os.remove(written)
