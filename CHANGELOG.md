@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
 - `polars.read_csv(path, options)` accepts `skip_rows` and `n_rows`, a
   non-negative row window: `skip_rows` drops CSV rows before the header is
@@ -16,7 +16,11 @@
   negative `n_rows` sentinels;
 - tests cover leading preamble rows, row limits, empty and past-end windows,
   headerless input, and combinations with projection, dtype overrides, and
-  null markers;
+  null markers; the installed-tree smoke test exercises a combined row-window
+  read through both the prefix and LuaRocks layouts;
+- `./scripts/test.sh`, `./scripts/smoke.sh`, and `./scripts/rockspec.sh` were
+  run for the release; a repeated LuaRocks check reused the unchanged content
+  stamp without a Cargo rebuild;
 - 85 tests.
 
 ## 0.12.0
