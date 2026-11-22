@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
 
 - `polars.read_csv(path, options)` accepts `rename_columns`, a non-empty,
   contiguous list of replacement names applied positionally to the columns of
@@ -27,6 +27,10 @@
   CRLF output round-trips through the reader; the installed-tree smoke test
   exercises the new reader and writer options through both the prefix and
   LuaRocks layouts;
+- `./scripts/test.sh`, `./scripts/smoke.sh`, and `./scripts/rockspec.sh` were
+  run for the release; the first LuaRocks check repaired the changed content
+  stamp, and a repeated check reused the installed tree without a Cargo
+  rebuild;
 - 95 tests.
 
 ## 0.13.0
