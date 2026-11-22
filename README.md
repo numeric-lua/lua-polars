@@ -42,6 +42,11 @@ end
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, a literal `null_value` placeholder for null fields, and a
   `line_terminator` of `"\n"` or `"\r\n"`
+- Parquet reader options: a `columns` name/list projection and a
+  `skip_rows`/`n_rows` window that keeps the file schema for empty results
+- Parquet writer options: a `compression` codec (`zstd`, `snappy`, `gzip`,
+  `brotli`, `lz4`, `uncompressed`), `statistics = false` to skip column
+  statistics, and positive `row_group_size`/`data_page_size` chunk controls
 - schema, shape, head, ordered columns
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, group-by, drop, rename, and with-columns
@@ -94,7 +99,9 @@ custom CSV delimiters, quote characters, comment prefixes, headerless files,
 read-time column projection, positional column renaming, dtype overrides,
 literal and per-column null markers, UTF-8 lossy decoding, and
 skip-rows/row-limit windows,
-writer delimiter/header/null/line-terminator options, schema, projection,
+writer delimiter/header/null/line-terminator options,
+Parquet column projections, row windows, compression codecs, statistics and
+chunk-size writer options, schema, projection,
 filtering, sorting, grouping, all eager join types, column operations, SQL,
 JSON conversion, and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
@@ -168,6 +175,11 @@ polars.read_csv(path, {
   null_values = { note = "NA", score = "9" },
 })
 polars.read_parquet(path)
+polars.read_parquet(path, {
+  columns = { "score", "name" },
+  skip_rows = 10,
+  n_rows = 100,
+})
 
 df:shape()                -- rows, cols
 df:schema()               -- { column = "i64", ... }
@@ -190,6 +202,12 @@ df:write_csv("out.tsv", {
 })
 df:write_csv("out-crlf.csv", { line_terminator = "\r\n" })
 df:write_parquet("out.parquet")
+df:write_parquet("out.parquet", {
+  compression = "snappy",
+  statistics = false,
+  row_group_size = 1000,
+  data_page_size = 65536,
+})
 df:to_table()
 df:to_json()
 df:close()

@@ -122,11 +122,32 @@ invalid or per-column null-value markers, invalid rename lists, unsupported enco
 negative or fractional row-window counts, a missing or unreadable path, and
 files that cannot be parsed.
 
-### `polars.read_parquet(path) -> DataFrame`
+### `polars.read_parquet(path [, options]) -> DataFrame`
 
-Reads a Parquet file.
+Reads a Parquet file. With no options it reads every row and column.
 
-Errors if the path is missing, unreadable, or cannot be parsed.
+`options` is an optional table:
+
+- `columns`: a column name or a non-empty list of names to read. The returned
+  frame keeps the requested order and contains only those columns. Unknown,
+  duplicate, and empty names are errors.
+- `skip_rows`: a non-negative integer, default `0`. Drops that many leading
+  data rows. Like `n_rows`, it must be at most `2^53 - 1`.
+- `n_rows`: a non-negative integer, default unlimited. Limits the data rows
+  read after `skip_rows`. `n_rows = 0` reads no rows while keeping the file
+  schema; a window past the end returns an empty frame.
+
+```lua
+polars.read_parquet("data.parquet")
+polars.read_parquet("data.parquet", {
+  columns = { "score", "name" },
+  skip_rows = 10,
+  n_rows = 100,
+})
+```
+
+Unknown option keys and invalid types are errors, as are a missing or
+unreadable path, unknown projection names, and files that cannot be parsed.
 
 ### `polars.null`
 
@@ -301,11 +322,38 @@ df:write_csv("crlf.csv", { line_terminator = "\r\n" })
 Unknown option keys and invalid types are errors, as are closed frames,
 non-string or empty paths, and write failures.
 
-### `df:write_parquet(path) -> DataFrame`
+### `df:write_parquet(path [, options]) -> DataFrame`
 
 Writes the frame as Parquet and returns `df` for chaining. The file is created
-or truncated. Errors when the frame is closed, the path is not a non-empty
-string, or the write fails.
+or truncated. With no options it writes Zstd-compressed pages with Polars'
+default statistics and chunk sizes.
+
+`options` is an optional table:
+
+- `compression`: `"zstd"` (default), `"snappy"`, `"gzip"`, `"brotli"`,
+  `"lz4"` (alias `"lz4-raw"`), or `"uncompressed"` (alias `"none"`), matched
+  case-insensitively. The pinned Polars writer uses each codec's default
+  level; there is no separate level option yet.
+- `statistics`: a boolean, default `true`. `false` skips the column statistics
+  (min/max/null count) that predicate pushdown readers can use.
+- `row_group_size`: a positive integer row count per row group. Omitted uses
+  Polars' default 262144-row chunks; `1` writes one row per group.
+- `data_page_size`: a positive integer maximum data-page size in bytes.
+  Omitted uses Polars' default 1 MiB pages.
+
+```lua
+df:write_parquet("out.parquet")
+df:write_parquet("out.parquet", {
+  compression = "snappy",
+  statistics = false,
+  row_group_size = 1000,
+  data_page_size = 65536,
+})
+```
+
+Unknown option keys and invalid types are errors, as are unsupported codec
+names, a non-positive or fractional chunk size, closed frames, non-string or
+empty paths, and write failures.
 
 ### `df:to_json() -> string`
 
@@ -382,6 +430,9 @@ PlFrame *pl_dataframe_read_csv_named_nulls(
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
+PlFrame *pl_dataframe_read_parquet_options(
+    const char *path, const char *const *columns, uint64_t column_count,
+    uint64_t skip_rows, int64_t n_rows, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
@@ -402,6 +453,10 @@ int pl_dataframe_write_csv_full(
     int32_t has_header, const char *null_value,
     const char *line_terminator, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
+int pl_dataframe_write_parquet_options(
+    PlFrame *frame, const char *path, const char *compression,
+    int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
+    char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ```
@@ -496,6 +551,24 @@ a null or empty string keeps `"\n"`, `"\r\n"` writes CRLF records, and every
 other value is an error. The terminator is written literally after the header
 and each data row. Earlier writer signatures and defaults are unchanged.
 
+`pl_dataframe_read_parquet_options` is additive; `pl_dataframe_read_parquet`
+keeps its signature and reads every row and column. It borrows
+`column_count` UTF-8 column names; a null array or zero count reads every
+column, while empty, duplicate, and unknown names are errors. `skip_rows`
+drops that many leading data rows. `n_rows` limits the rows read after the
+offset: `-1` reads every remaining row and any other negative value is an
+error. `n_rows = 0` materializes an empty frame with the file schema.
+
+`pl_dataframe_write_parquet_options` is additive; `pl_dataframe_write_parquet`
+keeps its signature and Zstd/statistics/default-chunking behavior. A null or
+empty `compression` keeps Zstd; the accepted names are `zstd`, `snappy`,
+`gzip`, `brotli`, `lz4`/`lz4-raw`, and `uncompressed`/`none`, matched
+case-insensitively. `statistics` is zero to skip column statistics and
+non-zero for the Polars defaults. A zero `row_group_size` or
+`data_page_size` keeps the Polars default; non-zero values are row and byte
+counts respectively. The compression string is borrowed for the duration of
+the call.
+
 ## Install layouts
 
 ### LuaRocks source rock
@@ -558,6 +631,8 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV reader positional column renaming and UTF-8 lossy decoding.
 - [x] CSV writer delimiter, header, and null-value options.
 - [x] CSV writer line terminator (`\n`, `\r\n`).
+- [x] Parquet reader column projection and row windows.
+- [x] Parquet writer compression, statistics, and chunk-size options.
 - [x] LuaRocks source-rock packaging.
 - [ ] LazyFrame/expressions.
 - [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.
