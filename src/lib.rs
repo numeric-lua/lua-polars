@@ -78,6 +78,7 @@ struct CsvWriteConfig {
     delimiter: u8,
     include_header: bool,
     null_value: Option<String>,
+    line_terminator: String,
 }
 
 impl Default for CsvWriteConfig {
@@ -86,6 +87,7 @@ impl Default for CsvWriteConfig {
             delimiter: DEFAULT_CSV_DELIMITER,
             include_header: true,
             null_value: None,
+            line_terminator: "\n".to_string(),
         }
     }
 }
@@ -182,6 +184,26 @@ unsafe fn read_csv_null_value(ptr: *const c_char, delimiter: u8) -> Result<Optio
         }
     }
     Ok(Some(text))
+}
+
+/// Reads the optional CSV record terminator for the writer.
+///
+/// A null pointer or an empty string keeps the default `\n`. Only `\n` and
+/// `\r\n` are accepted: arbitrary terminators would produce files the reader
+/// cannot split into records, and the strict set keeps the writer and reader
+/// round-trip honest. The terminator is written literally between records.
+unsafe fn read_csv_line_terminator(ptr: *const c_char) -> Result<String, String> {
+    if ptr.is_null() {
+        return Ok("\n".to_string());
+    }
+    let text = read_utf8(ptr, "line_terminator")?;
+    match text.as_str() {
+        "" | "\n" => Ok("\n".to_string()),
+        "\r\n" => Ok(text),
+        _ => Err(format!(
+            "CSV line_terminator must be \"\\n\" or \"\\r\\n\", got {text:?}"
+        )),
+    }
 }
 
 /// Reads an optional CSV projection from the C ABI.
@@ -1267,7 +1289,8 @@ fn write_csv_frame(df: &DataFrame, path: &str, config: CsvWriteConfig) -> Result
     let mut df = df.clone();
     let mut writer = CsvWriter::new(file)
         .include_header(config.include_header)
-        .with_separator(config.delimiter);
+        .with_separator(config.delimiter)
+        .with_line_terminator(PlSmallStr::from_str(&config.line_terminator));
     if let Some(null_value) = config.null_value {
         writer = writer.with_null_value(PlSmallStr::from_str(&null_value));
     }
@@ -1332,6 +1355,42 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_options(
             delimiter,
             include_header: has_header != 0,
             null_value: read_csv_null_value(null_value, delimiter)?,
+            ..CsvWriteConfig::default()
+        };
+        write_csv_frame(&frame.df, &path, config)
+    }));
+    finish_write(result, err)
+}
+
+/// Writes a CSV file with delimiter, header, null-value, and line-terminator
+/// controls.
+///
+/// This is the superset writer entry point. `delimiter`, `has_header`, and
+/// `null_value` have the same meaning as in
+/// [`pl_dataframe_write_csv_options`]. A null or empty `line_terminator` keeps
+/// the default `\n`; `\r\n` writes CRLF records, and any other value is an
+/// error. The terminator is written literally after the header and every data
+/// row. This entry point is additive; every earlier writer signature and
+/// default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_csv_full(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    null_value: *const c_char,
+    line_terminator: *const c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let delimiter = read_delimiter(delimiter)?;
+        let config = CsvWriteConfig {
+            delimiter,
+            include_header: has_header != 0,
+            null_value: read_csv_null_value(null_value, delimiter)?,
+            line_terminator: read_csv_line_terminator(line_terminator)?,
         };
         write_csv_frame(&frame.df, &path, config)
     }));

@@ -72,6 +72,10 @@ int pl_dataframe_write_csv(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_csv_options(
     PlFrame *frame, const char *path, const char *delimiter,
     int32_t has_header, const char *null_value, char **err);
+int pl_dataframe_write_csv_full(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value,
+    const char *line_terminator, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
@@ -293,6 +297,7 @@ local WRITE_CSV_OPTION_KEYS = {
   delimiter = true,
   header = true,
   null_value = true,
+  line_terminator = true,
 }
 
 local function write_csv_delimiter(value)
@@ -350,7 +355,18 @@ local function write_csv_options(options)
   if type(header) ~= "boolean" then
     error("write_csv header must be a boolean", 3)
   end
-  return delimiter, header, write_csv_null_value(options.null_value, delimiter)
+  local line_terminator = options.line_terminator
+  if line_terminator == nil then
+    line_terminator = "\n"
+  end
+  if type(line_terminator) ~= "string" then
+    error("write_csv line_terminator must be a string", 3)
+  end
+  if line_terminator ~= "\n" and line_terminator ~= "\r\n" then
+    error("write_csv line_terminator must be \"\\n\" or \"\\r\\n\"", 3)
+  end
+  return delimiter, header,
+    write_csv_null_value(options.null_value, delimiter), line_terminator
 end
 
 local function quote_identifier(name)
@@ -404,10 +420,10 @@ function DataFrame:write_csv(path, options)
   if type(path) ~= "string" or path == "" then
     error("write_csv path must be a string", 2)
   end
-  local delimiter, header, null_value = write_csv_options(options)
+  local delimiter, header, null_value, line_terminator = write_csv_options(options)
   local err = ffi.new("char *[1]")
-  local status = lib.pl_dataframe_write_csv_options(self:_require_open(), path,
-    delimiter, header and 1 or 0, null_value, err)
+  local status = lib.pl_dataframe_write_csv_full(self:_require_open(), path,
+    delimiter, header and 1 or 0, null_value, line_terminator, err)
   if status ~= 0 then
     error(take_error(err), 2)
   end
