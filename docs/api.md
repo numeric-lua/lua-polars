@@ -58,6 +58,11 @@ Polars' default.
   case-insensitively. Strict UTF-8 raises on invalid bytes; lossy mode replaces
   each invalid byte sequence with `U+FFFD` (`"\239\191\189"` in Lua strings).
   Other values are errors.
+- `try_parse_dates`: a boolean, default `false`. When true, Polars infers ISO
+  date and datetime columns instead of leaving them as strings; without it an
+  ISO-looking column still has dtype `str`. The option composes with projection,
+  dtype overrides, null markers, renames, the row window, and the encoding.
+  Non-boolean values are errors.
 - `dtypes`: a table mapping column names to dtype names, applied by name at
   read time instead of relying on inference. Supported dtypes are `bool` /
   `boolean`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, and `str` / `string` /
@@ -113,6 +118,7 @@ local renamed = polars.read_csv("headerless.csv", {
   rename_columns = { "id", "name", "score" },
 })
 local lossy = polars.read_csv("legacy.csv", { encoding = "utf8-lossy" })
+local dated = polars.read_csv("events.csv", { try_parse_dates = true })
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
@@ -148,6 +154,34 @@ polars.read_parquet("data.parquet", {
 
 Unknown option keys and invalid types are errors, as are a missing or
 unreadable path, unknown projection names, and files that cannot be parsed.
+
+### `polars.read_json(path [, options]) -> DataFrame`
+
+Reads a JSON file whose top level is either a single array of row objects or
+JSON Lines (one object per line). Columns and dtypes are inferred by Polars;
+JSON `null` becomes `polars.null` in `to_table()`. With no options it expects a
+single JSON array.
+
+`options` is an optional table:
+
+- `format`: `"array"` (default; aliases `"json"`) or `"lines"` (aliases
+  `"ndjson"`, `"jsonl"`, `"json-lines"`, and `"jsonlines"`), matched
+  case-insensitively. Other values are errors.
+- `columns`: a column name or a non-empty list of names to read. The returned
+  frame keeps the requested order and contains only those columns. Unknown,
+  duplicate, and empty names are errors.
+
+```lua
+local rows = polars.read_json("rows.json")
+local events = polars.read_json("events.jsonl", {
+  format = "lines",
+  columns = { "time", "event" },
+})
+```
+
+Unknown option keys and invalid types are errors, as are a missing or
+unreadable path, malformed JSON, unknown projection names, and files whose top
+level is not a supported array or object stream.
 
 ### `polars.null`
 
@@ -201,6 +235,18 @@ integer. Both arguments must be integers and at most `2^53 - 1` in magnitude.
 ```lua
 local page = df:slice(20, 10)
 local last_two = df:slice(-2, 2)
+```
+
+### `df:with_row_index([name, offset]) -> DataFrame`
+
+Returns a new frame with a row-index column prepended. `name` defaults to
+`"index"` and must be a non-empty string that does not collide with an existing
+column. `offset` is a non-negative integer, default `0`, added to the first row
+index; indexes then increase by one per row. Offset values above `2^53 - 1`
+are rejected.
+
+```lua
+local indexed = df:with_row_index("row_id", 100)
 ```
 
 ### `df:sql(query) -> DataFrame`
@@ -331,6 +377,12 @@ and empty fields for nulls, as before.
 - `line_terminator`: `"\n"` (default) or `"\r\n"`; the terminator is written
   after the header and every record. Other values are errors, keeping the
   output readable by the reader and by RFC 4180 consumers.
+- `quote_style`: `"necessary"` (default; quote only fields that need it),
+  `"always"` (quote every field), `"non_numeric"` (quote string fields even when
+  quoting is not strictly needed; `"non-numeric"` is an alias), or `"never"`
+  (never quote). Values are matched case-insensitively. `"never"` can produce
+  invalid CSV when a field contains the delimiter, a quote, or a line break,
+  matching Polars; use it only for controlled output.
 
 ```lua
 df:write_csv("out.csv")
@@ -340,6 +392,29 @@ df:write_csv("out.tsv", {
   null_value = "NA",
 })
 df:write_csv("crlf.csv", { line_terminator = "\r\n" })
+df:write_csv("quoted.csv", { quote_style = "always" })
+```
+
+Unknown option keys and invalid types are errors, as are closed frames,
+non-string or empty paths, and write failures.
+
+### `df:write_json(path [, options]) -> DataFrame`
+
+Writes the frame as JSON and returns `df` for chaining. The file is created or
+truncated. With no options it writes one JSON array of row objects, matching
+`to_json()` and `read_json`'s default.
+
+`options` is an optional table:
+
+- `format`: `"array"` (default; aliases `"json"`) or `"lines"` (aliases
+  `"ndjson"`, `"jsonl"`, `"json-lines"`, and `"jsonlines"`), matched
+  case-insensitively. JSON Lines writes one object per line and is not valid
+  JSON as a whole, so read it back with `format = "lines"`. Other values are
+  errors.
+
+```lua
+df:write_json("rows.json")
+df:write_json("rows.jsonl", { format = "lines" })
 ```
 
 Unknown option keys and invalid types are errors, as are closed frames,
@@ -452,10 +527,24 @@ PlFrame *pl_dataframe_read_csv_named_nulls(
     uint64_t skip_rows, int64_t n_rows,
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, char **err);
+PlFrame *pl_dataframe_read_csv_parsed(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
     uint64_t skip_rows, int64_t n_rows, char **err);
+PlFrame *pl_dataframe_read_json(
+    const char *path, int32_t json_lines,
+    const char *const *columns, uint64_t column_count, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
@@ -464,6 +553,8 @@ PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
 PlFrame *pl_dataframe_tail(PlFrame *frame, int64_t n, char **err);
 PlFrame *pl_dataframe_slice(
     PlFrame *frame, int64_t offset, uint64_t length, char **err);
+PlFrame *pl_dataframe_with_row_index(
+    PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_join(
     PlFrame *left, PlFrame *right, const char *how,
     const char *const *left_on, uint64_t left_count,
@@ -478,11 +569,17 @@ int pl_dataframe_write_csv_full(
     PlFrame *frame, const char *path, const char *delimiter,
     int32_t has_header, const char *null_value,
     const char *line_terminator, char **err);
+int pl_dataframe_write_csv_configured(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value,
+    const char *line_terminator, const char *quote_style, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
     int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
     char **err);
+int pl_dataframe_write_json(
+    PlFrame *frame, const char *path, int32_t json_lines, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ```
@@ -563,6 +660,13 @@ outside the projection is rejected, and a marker column absent from the file is
 reported by Polars. Markers are applied before positional renames, so they name
 the file's original columns, like dtype overrides.
 
+`pl_dataframe_read_csv_parsed` is additive and combines every earlier reader
+option with date inference. It accepts both the shared `null_values` array and
+the parallel `null_columns`/`named_null_values` arrays; supplying both policies
+is an error. `try_parse_dates` is zero for the string default and non-zero to
+infer ISO date and datetime columns. All other arguments match
+`pl_dataframe_read_csv_named_nulls` plus the shared null-marker array.
+
 `pl_dataframe_write_csv_options` is additive; `pl_dataframe_write_csv` keeps
 its signature and comma/header/empty-null defaults. A null `delimiter` means
 `","`; `has_header` is zero to omit the header row. A null or empty
@@ -576,6 +680,12 @@ the earlier delimiter, header, and null-value arguments with `line_terminator`:
 a null or empty string keeps `"\n"`, `"\r\n"` writes CRLF records, and every
 other value is an error. The terminator is written literally after the header
 and each data row. Earlier writer signatures and defaults are unchanged.
+
+`pl_dataframe_write_csv_configured` adds `quote_style` to the `_full` writer:
+a null or empty string keeps `necessary`, and `always`, `non_numeric`
+(alias `non-numeric`), and `never` are accepted case-insensitively. `never`
+can produce invalid CSV for fields containing the delimiter, quote, or a line
+break, matching Polars.
 
 `pl_dataframe_read_parquet_options` is additive; `pl_dataframe_read_parquet`
 keeps its signature and reads every row and column. It borrows
@@ -594,6 +704,14 @@ non-zero for the Polars defaults. A zero `row_group_size` or
 `data_page_size` keeps the Polars default; non-zero values are row and byte
 counts respectively. The compression string is borrowed for the duration of
 the call.
+
+`pl_dataframe_read_json` is additive and reads a JSON array (`json_lines` zero)
+or JSON Lines (`json_lines` non-zero) with an optional projection. It borrows
+`column_count` UTF-8 column names; a null array or zero count reads every
+column, while empty and duplicate names are errors. The returned frame keeps
+the requested order. `pl_dataframe_write_json` writes the same two formats from
+an open frame and returns zero on success or non-zero with `err` set on
+failure.
 
 ## Install layouts
 

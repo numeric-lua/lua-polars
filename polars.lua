@@ -66,10 +66,24 @@ PlFrame *pl_dataframe_read_csv_named_nulls(
     uint64_t skip_rows, int64_t n_rows,
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, char **err);
+PlFrame *pl_dataframe_read_csv_parsed(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
     uint64_t skip_rows, int64_t n_rows, char **err);
+PlFrame *pl_dataframe_read_json(
+    const char *path, int32_t json_lines,
+    const char *const *columns, uint64_t column_count, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
@@ -78,6 +92,8 @@ PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
 PlFrame *pl_dataframe_tail(PlFrame *frame, int64_t n, char **err);
 PlFrame *pl_dataframe_slice(
     PlFrame *frame, int64_t offset, uint64_t length, char **err);
+PlFrame *pl_dataframe_with_row_index(
+    PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_join(
     PlFrame *left, PlFrame *right, const char *how,
     const char *const *left_on, uint64_t left_count,
@@ -92,11 +108,17 @@ int pl_dataframe_write_csv_full(
     PlFrame *frame, const char *path, const char *delimiter,
     int32_t has_header, const char *null_value,
     const char *line_terminator, char **err);
+int pl_dataframe_write_csv_configured(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value,
+    const char *line_terminator, const char *quote_style, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
     int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
     char **err);
+int pl_dataframe_write_json(
+    PlFrame *frame, const char *path, int32_t json_lines, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ]]
@@ -279,6 +301,25 @@ function DataFrame:slice(offset, length)
   return new_frame(pointer, err)
 end
 
+-- The row index is prepended, matching Polars' with_row_index. An offset
+-- shifts the first value; the default is zero. The bridge and Polars reject
+-- an empty name or one that collides with an existing column.
+function DataFrame:with_row_index(name, offset)
+  name = name == nil and "index" or name
+  if type(name) ~= "string" or name == "" then
+    error("with_row_index name must be a non-empty string", 2)
+  end
+  offset = offset == nil and 0 or offset
+  if type(offset) ~= "number" or offset < 0 or offset % 1 ~= 0 or
+      offset > 9007199254740991 then
+    error("with_row_index offset must be a non-negative integer", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_with_row_index(self:_require_open(), name,
+    offset, err)
+  return new_frame(pointer, err)
+end
+
 function DataFrame:sql(query)
   if type(query) ~= "string" or query == "" then
     error("sql query must be a non-empty string", 2)
@@ -348,7 +389,34 @@ local WRITE_CSV_OPTION_KEYS = {
   header = true,
   null_value = true,
   line_terminator = true,
+  quote_style = true,
 }
+
+local CSV_QUOTE_STYLES = {
+  necessary = "necessary",
+  always = "always",
+  non_numeric = "non_numeric",
+  ["non-numeric"] = "non_numeric",
+  never = "never",
+}
+
+-- The default is Necessary, so an absent option keeps the earlier writer ABI
+-- path. Never deliberately permits invalid CSV when a field needs quoting; the
+-- other styles preserve a readable file.
+local function write_csv_quote_style(value)
+  if value == nil then
+    return nil
+  end
+  if type(value) ~= "string" or value == "" then
+    error("write_csv quote_style must be a non-empty string", 3)
+  end
+  local canonical = CSV_QUOTE_STYLES[value:lower()]
+  if canonical == nil then
+    error("write_csv quote_style must be one of necessary, always, " ..
+      "non_numeric, or never", 3)
+  end
+  return canonical
+end
 
 local function write_csv_delimiter(value)
   if value == nil then
@@ -416,7 +484,8 @@ local function write_csv_options(options)
     error("write_csv line_terminator must be \"\\n\" or \"\\r\\n\"", 3)
   end
   return delimiter, header,
-    write_csv_null_value(options.null_value, delimiter), line_terminator
+    write_csv_null_value(options.null_value, delimiter), line_terminator,
+    write_csv_quote_style(options.quote_style)
 end
 
 local function quote_identifier(name)
@@ -493,6 +562,33 @@ local function write_parquet_options(options)
     parquet_size_option(options, "data_page_size")
 end
 
+local JSON_FORMAT_ALIASES = {
+  array = "array",
+  json = "array",
+  lines = "lines",
+  ndjson = "lines",
+  jsonl = "lines",
+  ["json-lines"] = "lines",
+  jsonlines = "lines",
+}
+
+-- Both JSON readers and writers default to a single JSON array. JSON Lines is
+-- opt-in because the whole-file result is not valid JSON and needs the matching
+-- read format to round-trip.
+local function json_format(value, label)
+  if value == nil then
+    return "array"
+  end
+  if type(value) ~= "string" or value == "" then
+    error(label .. " format must be a non-empty string", 3)
+  end
+  local canonical = JSON_FORMAT_ALIASES[value:lower()]
+  if canonical == nil then
+    error(label .. " format must be 'array' or 'lines'", 3)
+  end
+  return canonical
+end
+
 function DataFrame:unique()
   return self:sql("SELECT DISTINCT * FROM df")
 end
@@ -540,10 +636,18 @@ function DataFrame:write_csv(path, options)
   if type(path) ~= "string" or path == "" then
     error("write_csv path must be a string", 2)
   end
-  local delimiter, header, null_value, line_terminator = write_csv_options(options)
+  local delimiter, header, null_value, line_terminator, quote_style =
+    write_csv_options(options)
   local err = ffi.new("char *[1]")
-  local status = lib.pl_dataframe_write_csv_full(self:_require_open(), path,
-    delimiter, header and 1 or 0, null_value, line_terminator, err)
+  local status
+  if quote_style ~= nil then
+    status = lib.pl_dataframe_write_csv_configured(self:_require_open(), path,
+      delimiter, header and 1 or 0, null_value, line_terminator, quote_style,
+      err)
+  else
+    status = lib.pl_dataframe_write_csv_full(self:_require_open(), path,
+      delimiter, header and 1 or 0, null_value, line_terminator, err)
+  end
   if status ~= 0 then
     error(take_error(err), 2)
   end
@@ -562,6 +666,35 @@ function DataFrame:write_parquet(path, options)
   local status = lib.pl_dataframe_write_parquet_options(self:_require_open(),
     path, compression, statistics and 1 or 0, row_group_size, data_page_size,
     err)
+  if status ~= 0 then
+    error(take_error(err), 2)
+  end
+  return self
+end
+
+local JSON_WRITE_OPTION_KEYS = {
+  format = true,
+}
+
+function DataFrame:write_json(path, options)
+  if type(path) ~= "string" or path == "" then
+    error("write_json path must be a string", 2)
+  end
+  local format = "array"
+  if options ~= nil then
+    if type(options) ~= "table" then
+      error("write_json options must be a table", 2)
+    end
+    for key in pairs(options) do
+      if not JSON_WRITE_OPTION_KEYS[key] then
+        error("write_json options: unknown field '" .. tostring(key) .. "'", 2)
+      end
+    end
+    format = json_format(options.format, "write_json")
+  end
+  local err = ffi.new("char *[1]")
+  local status = lib.pl_dataframe_write_json(self:_require_open(), path,
+    format == "lines" and 1 or 0, err)
   if status ~= 0 then
     error(take_error(err), 2)
   end
@@ -797,6 +930,7 @@ local CSV_OPTION_KEYS = {
   skip_rows = true,
   n_rows = true,
   encoding = true,
+  try_parse_dates = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -1070,10 +1204,22 @@ local function csv_row_window(options)
   return row_window(options, "read_csv")
 end
 
+-- Date inference is opt-in because it changes an ISO-looking string column
+-- into a Date/Datetime column and therefore its schema and sorting behavior.
+local function csv_try_parse_dates(value)
+  if value == nil then
+    return false
+  end
+  if type(value) ~= "boolean" then
+    error("read_csv try_parse_dates must be a boolean", 3)
+  end
+  return value
+end
+
 local function csv_options(options)
   if options == nil then
     return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil,
-      nil, nil
+      nil, nil, false
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -1102,9 +1248,11 @@ local function csv_options(options)
     csv_null_values(options.null_values)
   local skip_rows, n_rows, window_requested = csv_row_window(options)
   local encoding = csv_encoding(options.encoding)
+  local try_parse_dates = csv_try_parse_dates(options.try_parse_dates)
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
-    rename_columns, encoding, named_null_columns, named_null_values
+    rename_columns, encoding, named_null_columns, named_null_values,
+    try_parse_dates
 end
 
 function polars.read_csv(path, options)
@@ -1113,8 +1261,8 @@ function polars.read_csv(path, options)
   end
   local delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
-    rename_columns, encoding, named_null_columns, named_null_values =
-    csv_options(options)
+    rename_columns, encoding, named_null_columns, named_null_values,
+    try_parse_dates = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -1155,7 +1303,14 @@ function polars.read_csv(path, options)
     end
   end
   local pointer
-  if named_null_columns ~= nil then
+  if try_parse_dates then
+    pointer = lib.pl_dataframe_read_csv_parsed(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, named_columns,
+      named_markers, named_null_columns and #named_null_columns or 0,
+      skip_rows, n_rows, renames, rename_columns and #rename_columns or 0,
+      encoding, 1, err)
+  elseif named_null_columns ~= nil then
     pointer = lib.pl_dataframe_read_csv_named_nulls(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, named_columns, named_markers,
@@ -1237,6 +1392,45 @@ function polars.read_parquet(path, options)
     pointer = lib.pl_dataframe_read_parquet_options(path, names,
       names and #columns or 0, skip_rows, n_rows, err)
   end
+  return new_frame(pointer, err)
+end
+
+local JSON_READ_OPTION_KEYS = {
+  format = true,
+  columns = true,
+}
+
+local function read_json_options(options)
+  if options == nil then
+    return "array", nil
+  end
+  if type(options) ~= "table" then
+    error("read_json options must be a table", 3)
+  end
+  for key in pairs(options) do
+    if not JSON_READ_OPTION_KEYS[key] then
+      error("read_json options: unknown field '" .. tostring(key) .. "'", 3)
+    end
+  end
+  return json_format(options.format, "read_json"),
+    column_projection(options.columns, "read_json")
+end
+
+function polars.read_json(path, options)
+  if type(path) ~= "string" or path == "" then
+    error("read_json path must be a non-empty string", 2)
+  end
+  local format, columns = read_json_options(options)
+  local err = ffi.new("char *[1]")
+  local names
+  if columns ~= nil then
+    names = ffi.new("const char *[?]", #columns)
+    for index, name in ipairs(columns) do
+      names[index - 1] = name
+    end
+  end
+  local pointer = lib.pl_dataframe_read_json(path,
+    format == "lines" and 1 or 0, names, names and #columns or 0, err)
   return new_frame(pointer, err)
 end
 

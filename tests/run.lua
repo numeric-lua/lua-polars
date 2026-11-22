@@ -203,6 +203,70 @@ test("tail and slice reject invalid counts", function()
   eq(ok, false, "closed tail accepted")
   truthy(tostring(err):find("closed", 1, true), "closed tail error")
 end)
+test("with_row_index prepends a zero-based index column", function()
+  local df = polars.read_csv(fixture)
+  local indexed = df:with_row_index("row")
+  eq(indexed:shape(), 5)
+  eq(table.concat(indexed:columns(), ","),
+    "row,name,team,score,active")
+  local rows = indexed:to_table()
+  eq(rows[1].row, 0)
+  eq(rows[1].name, "ana")
+  eq(rows[5].row, 4)
+  eq(rows[5].name, "eva")
+  indexed:close()
+
+  local default = df:with_row_index()
+  eq(default:columns()[1], "index")
+  eq(default:to_table()[1].index, 0)
+  default:close()
+  df:close()
+end)
+test("with_row_index honors an offset and composes with a row window", function()
+  local df = polars.read_csv(fixture)
+  local indexed = df:with_row_index("row", 10)
+  local rows = indexed:to_table()
+  eq(rows[1].row, 10)
+  eq(rows[5].row, 14)
+  local windowed = indexed:slice(2, 2)
+  eq(windowed:shape(), 2)
+  rows = windowed:to_table()
+  eq(rows[1].row, 12)
+  eq(rows[1].name, "caio")
+  eq(rows[2].row, 13)
+  windowed:close()
+  indexed:close()
+  df:close()
+end)
+test("with_row_index rejects invalid names, offsets, and collisions", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { "", 0, "name" },
+    { 42, 0, "name" },
+    { "row", -1, "offset" },
+    { "row", 1.5, "offset" },
+    { "row", "1", "offset" },
+    { "row", true, "offset" },
+    { "row", math.huge, "offset" },
+    { "row", 2 ^ 53, "offset" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function()
+      df:with_row_index(case[1], case[2])
+    end)
+    eq(ok, false, "invalid with_row_index arguments accepted")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:with_row_index("name") end)
+  eq(ok, false, "colliding row-index name accepted")
+  truthy(tostring(err):lower():find("name", 1, true),
+    "row-index collision error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:with_row_index("row") end)
+  eq(ok, false, "closed with_row_index accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed with_row_index error")
+end)
 local semicolon_fixture = root .. "/tests/fixtures/semicolon.csv"
 local pipe_fixture = root .. "/tests/fixtures/pipe_no_header.csv"
 local null_fixture = root .. "/tests/fixtures/null_values.csv"
@@ -937,6 +1001,65 @@ test("encoding rejects unsupported values", function()
       "encoding guidance: " .. tostring(err))
   end
 end)
+local date_fixture = root .. "/tests/fixtures/dates.csv"
+test("try_parse_dates infers date and datetime columns", function()
+  local plain = polars.read_csv(date_fixture)
+  eq(plain:schema().day, "str")
+  eq(plain:schema().stamp, "str")
+  eq(plain:to_table()[1].day, "2024-01-02")
+  plain:close()
+
+  local dated = polars.read_csv(date_fixture, { try_parse_dates = true })
+  eq(dated:shape(), 3)
+  eq(dated:schema().day, "date")
+  truthy(dated:schema().stamp:find("datetime", 1, true),
+    "datetime dtype: " .. tostring(dated:schema().stamp))
+  local rows = dated:to_table()
+  eq(rows[1].day, "2024-01-02")
+  eq(rows[3].day, "2025-06-15")
+  eq(rows[1].note, "ok")
+  truthy(rows[1].stamp ~= nil, "parsed datetime value")
+  dated:close()
+
+  local explicit = polars.read_csv(date_fixture, {
+    try_parse_dates = false,
+  })
+  eq(explicit:schema().day, "str")
+  explicit:close()
+end)
+test("try_parse_dates combines with projection, dtypes, nulls, renames, and windows", function()
+  local df = polars.read_csv(date_fixture, {
+    try_parse_dates = true,
+    columns = { "day", "id", "note" },
+    dtypes = { id = "f64" },
+    null_values = { note = "NA" },
+    n_rows = 2,
+    rename_columns = { "when", "id", "label" },
+  })
+  eq(df:shape(), 2)
+  eq(table.concat(df:columns(), ","), "when,id,label")
+  eq(df:schema().when, "date")
+  eq(df:schema().id, "f64")
+  local rows = df:to_table()
+  eq(rows[1].when, "2024-01-02")
+  eq(rows[1].id, 1)
+  eq(rows[1].label, "ok")
+  eq(rows[2].label, polars.null)
+  df:close()
+end)
+test("try_parse_dates rejects non-boolean values", function()
+  local cases = { 1, 0, "true", {}, function() end }
+  for _, value in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, date_fixture, {
+      try_parse_dates = value,
+    })
+    eq(ok, false, "invalid try_parse_dates accepted")
+    truthy(tostring(err):find("try_parse_dates", 1, true),
+      "try_parse_dates error: " .. tostring(err))
+    truthy(tostring(err):find("boolean", 1, true),
+      "try_parse_dates guidance: " .. tostring(err))
+  end
+end)
 test("select returns chosen columns in order", function()
   local df = polars.read_csv(fixture):select("name", "score")
   local rows, cols = df:shape()
@@ -1568,6 +1691,72 @@ test("CSV writer line_terminator combines with delimiter, header, and null_value
   loaded:close()
   df:close()
 end)
+test("CSV writer quote_style controls quoting", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  eq(df:write_csv(out, { quote_style = "always" }), df,
+    "always quote_style return value")
+  local raw = read_file(out)
+  truthy(raw:find('"id","name","note"\n', 1, true), "always header")
+  truthy(raw:find('"1","ana","hello, world"\n', 1, true),
+    "always quoted string record")
+  local loaded = polars.read_csv(out)
+  eq(loaded:shape(), 3)
+  local always_rows = loaded:to_table()
+  eq(find_row(always_rows, { id = 1 }).note, "hello, world")
+  -- QuoteStyle.Always writes the empty null as `""`, which Polars reads back as
+  -- an empty string rather than null; use a null_value to preserve nulls.
+  eq(find_row(always_rows, { id = 3 }).note, "")
+  loaded:close()
+
+  df:write_csv(out, { quote_style = "non_numeric" })
+  raw = read_file(out)
+  truthy(raw:find('"id","name","note"\n', 1, true),
+    "non_numeric quoted header")
+  truthy(raw:find('1,"ana","hello, world"\n', 1, true),
+    "non_numeric quoted strings")
+  truthy(raw:find('3,"caio",\n', 1, true), "non_numeric empty null")
+  loaded = polars.read_csv(out)
+  check_roundtrip_frame(loaded)
+  loaded:close()
+
+  df:write_csv(out, { quote_style = "never" })
+  raw = read_file(out)
+  truthy(raw:find("id,name,note\n", 1, true), "never unquoted header")
+  truthy(raw:find('1,ana,hello, world\n', 1, true),
+    "never unquoted comma field")
+  truthy(raw:find('2,bia,say "hi"\n', 1, true),
+    "never preserves literal quotes in data")
+  df:write_csv(out, { quote_style = "NECESSARY" })
+  raw = read_file(out)
+  truthy(raw:find("id,name,note\n", 1, true), "necessary header")
+  truthy(raw:find('1,ana,"hello, world"\n', 1, true),
+    "necessary quoted string record")
+  df:close()
+end)
+test("CSV writer quote_style combines with other writer options", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  df:write_csv(out, {
+    delimiter = ";",
+    header = false,
+    null_value = "NA",
+    line_terminator = "\r\n",
+    quote_style = "always",
+  })
+  local raw = read_file(out)
+  truthy(raw:find('"1";"ana";"hello, world"\r\n', 1, true),
+    "always combined string record")
+  truthy(raw:find('"3";"caio";"NA"\r\n', 1, true),
+    "always combined null record")
+  local loaded = polars.read_csv(out, { delimiter = ";", header = false })
+  eq(loaded:shape(), 3)
+  local rows = loaded:to_table()
+  eq(rows[1].column_2, "ana")
+  eq(rows[3].column_3, "NA")
+  loaded:close()
+  df:close()
+end)
 test("CSV writer defaults stay comma, header, and empty null", function()
   local df = polars.read_csv(roundtrip_fixture)
   local out = new_temp_path(".csv")
@@ -1583,6 +1772,9 @@ test("CSV writer rejects invalid options", function()
   local cases = {
     { 42, "options must be a table" },
     { { separator = ";" }, "unknown field 'separator'" },
+    { { quote_style = 42 }, "quote_style must be a non-empty string" },
+    { { quote_style = "" }, "quote_style must be a non-empty string" },
+    { { quote_style = "sometimes" }, "quote_style must be one of" },
     { { delimiter = 59 }, "delimiter must be a one-byte string" },
     { { delimiter = "" }, "delimiter" },
     { { delimiter = ";;" }, "delimiter" },
@@ -1750,6 +1942,164 @@ test("head rejects negative counts", function()
   end)
   eq(ok, false)
   df:close()
+end)
+
+current = "json io"
+local json_array_fixture = root .. "/tests/fixtures/sample.json"
+local json_lines_fixture = root .. "/tests/fixtures/sample.jsonl"
+test("read_json reads a JSON array and infers the schema", function()
+  local df = polars.read_json(json_array_fixture)
+  eq(df:shape(), 3)
+  eq(table.concat(df:columns(), ","), "id,name,score,active")
+  local schema = df:schema()
+  eq(schema.id, "i64")
+  eq(schema.name, "str")
+  eq(schema.score, "i64")
+  eq(schema.active, "bool")
+  local rows = df:to_table()
+  eq(rows[1].id, 1)
+  eq(rows[1].name, "ana")
+  eq(rows[1].active, true)
+  eq(rows[3].name, "caio")
+  eq(rows[3].score, 12)
+  df:close()
+end)
+test("read_json reads JSON Lines with aliases", function()
+  local df = polars.read_json(json_lines_fixture, { format = "lines" })
+  eq(df:shape(), 3)
+  eq(df:to_table()[2].name, "bia")
+  df:close()
+  local alias = polars.read_json(json_lines_fixture, { format = "NDJSON" })
+  eq(alias:shape(), 3)
+  eq(alias:to_table()[3].score, 12)
+  alias:close()
+  local json_alias = polars.read_json(json_array_fixture, { format = "json" })
+  eq(json_alias:shape(), 3)
+  json_alias:close()
+end)
+test("read_json projects columns in the requested order", function()
+  local df = polars.read_json(json_array_fixture, {
+    columns = { "score", "name" },
+  })
+  eq(df:shape(), 3)
+  eq(table.concat(df:columns(), ","), "score,name")
+  local rows = df:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[1].name, "ana")
+  eq(rows[1].id, nil)
+  eq(rows[3].score, 12)
+  df:close()
+
+  local single = polars.read_json(json_lines_fixture, {
+    format = "lines",
+    columns = "name",
+  })
+  eq(table.concat(single:columns(), ","), "name")
+  eq(single:to_table()[1].name, "ana")
+  single:close()
+end)
+test("read_json rejects malformed options, missing files, and invalid JSON", function()
+  local cases = {
+    { { format = 42 }, "format must be a non-empty string" },
+    { { format = "" }, "format must be a non-empty string" },
+    { { format = "xml" }, "format must be 'array' or 'lines'" },
+    { { columns = {} }, "columns must not be empty" },
+    { { columns = 42 }, "columns must be a column name or a list" },
+    { { columns = { 42 } }, "entries must be non-empty strings" },
+    { { columns = { "name", "name" } }, "duplicate" },
+    { { columns = { "missing" } }, "missing" },
+    { { rows = 1 }, "unknown field 'rows'" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_json, json_array_fixture, case[1])
+    eq(ok, false, "invalid read_json options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(polars.read_json, 42)
+  eq(ok, false, "non-string read_json path accepted")
+  truthy(tostring(err):find("path", 1, true), "read_json path error")
+
+  ok, err = pcall(polars.read_json, root .. "/tests/fixtures/missing.json")
+  eq(ok, false, "missing JSON file accepted")
+  truthy(tostring(err):find("No such file") or tostring(err):find("os error"),
+    "missing JSON file error")
+
+  local malformed = new_temp_path(".json")
+  local file = assert(io.open(malformed, "w"))
+  file:write('{"id": 1')
+  file:close()
+  ok, err = pcall(polars.read_json, malformed)
+  eq(ok, false, "malformed JSON accepted")
+  truthy(tostring(err):find("JSON", 1, true) or
+    tostring(err):find("json", 1, true) or
+    tostring(err):find("Syntax", 1, true) or
+    tostring(err):find("EOF", 1, true), "malformed JSON error: " .. tostring(err))
+end)
+test("write_json writes an array that read_json round-trips", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".json")
+  eq(df:write_json(out), df, "write_json return value")
+  local raw = read_file(out)
+  truthy(raw:find("^%s*%["), "JSON array output")
+  truthy(raw:find('"id"', 1, true), "JSON column name")
+  local loaded = polars.read_json(out)
+  eq(loaded:shape(), 3)
+  eq(table.concat(loaded:columns(), ","), "id,name,note")
+  local rows = loaded:to_table()
+  eq(find_row(rows, { id = 1 }).note, "hello, world")
+  eq(find_row(rows, { id = 2 }).note, 'say "hi"')
+  eq(find_row(rows, { id = 3 }).note, polars.null)
+  loaded:close()
+  df:close()
+end)
+test("write_json writes JSON Lines with aliases", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".jsonl")
+  df:write_json(out, { format = "lines" })
+  local raw = read_file(out)
+  truthy(raw:find("^%s*%{"), "JSON Lines output starts with an object")
+  truthy(not raw:find("%[", 1), "JSON Lines output has an array bracket")
+  local loaded = polars.read_json(out, { format = "lines" })
+  eq(loaded:shape(), 3)
+  eq(find_row(loaded:to_table(), { id = 3 }).note, polars.null)
+  loaded:close()
+  df:write_json(out, { format = "ndjson" })
+  loaded = polars.read_json(out, { format = "jsonl" })
+  eq(loaded:shape(), 3)
+  loaded:close()
+  df:close()
+end)
+test("write_json rejects malformed options and failures", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".json")
+  local cases = {
+    { 42, "options must be a table" },
+    { { rows = 1 }, "unknown field 'rows'" },
+    { { format = 42 }, "format must be a non-empty string" },
+    { { format = "" }, "format must be a non-empty string" },
+    { { format = "xml" }, "format must be 'array' or 'lines'" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:write_json(out, case[1]) end)
+    eq(ok, false, "invalid write_json options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:write_json("") end)
+  eq(ok, false, "empty write_json path accepted")
+  truthy(tostring(err):find("path must be a string", 1, true),
+    "write_json path error")
+  ok, err = pcall(function()
+    df:write_json(temp_path() .. "/missing/out.json")
+  end)
+  eq(ok, false, "missing JSON directory accepted")
+  truthy(tostring(err):find("No such file") or tostring(err):find("os error"),
+    "write_json filesystem error")
+  df:close()
+  ok, err = pcall(function() df:write_json(out) end)
+  eq(ok, false, "closed write_json accepted")
+  truthy(tostring(err):find("closed", 1, true), "write_json closed-frame error")
 end)
 
 current = "json"

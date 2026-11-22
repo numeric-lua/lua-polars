@@ -54,6 +54,7 @@ struct CsvReadConfig {
     skip_rows: usize,
     n_rows: Option<usize>,
     encoding: CsvEncoding,
+    try_parse_dates: bool,
 }
 
 impl Default for CsvReadConfig {
@@ -71,6 +72,7 @@ impl Default for CsvReadConfig {
             skip_rows: 0,
             n_rows: None,
             encoding: CsvEncoding::Utf8,
+            try_parse_dates: false,
         }
     }
 }
@@ -81,6 +83,7 @@ struct CsvWriteConfig {
     include_header: bool,
     null_value: Option<String>,
     line_terminator: String,
+    quote_style: QuoteStyle,
 }
 
 impl Default for CsvWriteConfig {
@@ -90,7 +93,25 @@ impl Default for CsvWriteConfig {
             include_header: true,
             null_value: None,
             line_terminator: "\n".to_string(),
+            quote_style: QuoteStyle::Necessary,
         }
+    }
+}
+
+/// Maps a Lua-facing CSV quote style to Polars' writer enum.
+///
+/// A null or empty name keeps the default `necessary`; `non_numeric` also
+/// accepts the hyphenated spelling. Matching is case-insensitive.
+fn parse_csv_quote_style(value: Option<&str>) -> Result<QuoteStyle, String> {
+    let value = value.unwrap_or("necessary");
+    match value.to_ascii_lowercase().as_str() {
+        "" | "necessary" => Ok(QuoteStyle::Necessary),
+        "always" => Ok(QuoteStyle::Always),
+        "non_numeric" | "non-numeric" => Ok(QuoteStyle::NonNumeric),
+        "never" => Ok(QuoteStyle::Never),
+        other => Err(format!(
+            "unsupported CSV quote_style '{other}'; expected necessary, always, non_numeric, or never"
+        )),
     }
 }
 
@@ -603,6 +624,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
                 .with_comment_prefix(config.comment.map(CommentPrefix::Single))
                 .with_null_values(null_values.clone())
                 .with_encoding(config.encoding)
+                .with_try_parse_dates(config.try_parse_dates)
         })
         .try_into_reader_with_file_path(Some(PathBuf::from(path)))
         .map_err(|error| error.to_string())?
@@ -1198,6 +1220,66 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_named_nulls(
     finish_frame(result, err)
 }
 
+/// Reads a CSV file with every earlier reader option plus date inference.
+///
+/// This is the superset entry point for the parse-time options. All shared
+/// columns, dtypes, null markers, renames, encoding, and row window arguments
+/// have the same meaning as in the earlier readers. `null_values` and
+/// `null_columns`/`named_null_values` are separate policies; supplying both is
+/// an error, matching the Lua surface where a marker table is either a list or
+/// a per-column map. `try_parse_dates` is non-zero to let Polars infer ISO date
+/// and datetime columns instead of strings. This entry point is additive; every
+/// earlier reader signature and default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_parsed(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    null_columns: *const *const c_char,
+    named_null_values: *const *const c_char,
+    named_null_value_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    rename_columns: *const *const c_char,
+    rename_column_count: u64,
+    encoding: *const c_char,
+    try_parse_dates: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
+            skip_rows,
+            n_rows,
+        )?;
+        config.encoding = read_csv_encoding(encoding)?;
+        config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
+        config.named_null_values =
+            read_csv_named_null_values(null_columns, named_null_values, named_null_value_count)?;
+        config.try_parse_dates = try_parse_dates != 0;
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_parquet(
     path: *const c_char,
@@ -1287,6 +1369,76 @@ pub unsafe extern "C" fn pl_dataframe_read_parquet_options(
         let mut reader = ParquetReader::new(file).with_slice(Some((skip_rows, length)));
         if let Some(columns) = columns {
             reader = reader.with_columns(Some(columns));
+        }
+        reader.finish().map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads an optional JSON projection from the C ABI.
+///
+/// A null pointer or a zero count leaves the projection disabled. Column names
+/// are borrowed for the duration of the call; empty and duplicate names are
+/// rejected before the file is parsed.
+unsafe fn read_json_columns(
+    ptr: *const *const c_char,
+    count: u64,
+) -> Result<Option<Vec<String>>, String> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if ptr.is_null() {
+        return Err("JSON columns are null".to_string());
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| "JSON column count is too large".to_string())?;
+    let raw = std::slice::from_raw_parts(ptr, count);
+    let mut seen = std::collections::HashSet::new();
+    let mut columns = Vec::with_capacity(count);
+    for (index, &column_ptr) in raw.iter().enumerate() {
+        let column = read_utf8(column_ptr, &format!("JSON column at index {index}"))?;
+        if column.is_empty() {
+            return Err(format!("JSON column at index {index} must not be empty"));
+        }
+        if !seen.insert(column.clone()) {
+            return Err(format!("duplicate JSON column '{column}'"));
+        }
+        columns.push(column);
+    }
+    Ok(Some(columns))
+}
+
+/// Reads a JSON array or JSON Lines file with an optional column projection.
+///
+/// `json_lines` is zero for a single JSON array and non-zero for one object per
+/// line. `columns` points to `column_count` UTF-8 names; a null array or zero
+/// count reads every column. The returned frame keeps the requested order.
+/// This entry point is additive and leaves every earlier reader unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_json(
+    path: *const c_char,
+    json_lines: i32,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let columns = read_json_columns(columns, column_count)?;
+        let file = File::open(&path).map_err(|error| error.to_string())?;
+        let mut reader = JsonReader::new(file).with_json_format(if json_lines != 0 {
+            JsonFormat::JsonLines
+        } else {
+            JsonFormat::Json
+        });
+        if let Some(columns) = columns {
+            reader = reader.with_projection(Some(
+                columns
+                    .iter()
+                    .map(|name| PlSmallStr::from_str(name.as_str()))
+                    .collect(),
+            ));
         }
         reader.finish().map_err(|error| error.to_string())
     }));
@@ -1430,6 +1582,32 @@ pub unsafe extern "C" fn pl_dataframe_slice(
     finish_frame(result, err)
 }
 
+/// Prepends a zero-based row-index column. `offset` shifts the first index
+/// value, so an offset of 10 starts at 10. The name is borrowed for the call
+/// and must be non-empty; Polars rejects names that collide with a column.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_with_row_index(
+    ptr: *mut PlFrame,
+    name: *const c_char,
+    offset: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let name = read_utf8(name, "row index name")?;
+        if name.is_empty() {
+            return Err("row index name must not be empty".to_string());
+        }
+        let offset = IdxSize::try_from(offset)
+            .map_err(|_| "row index offset is too large for this platform".to_string())?;
+        frame
+            .df
+            .with_row_index(PlSmallStr::from_str(&name), Some(offset))
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_join(
     left_ptr: *mut PlFrame,
@@ -1549,7 +1727,8 @@ fn write_csv_frame(df: &DataFrame, path: &str, config: CsvWriteConfig) -> Result
     let mut writer = CsvWriter::new(file)
         .include_header(config.include_header)
         .with_separator(config.delimiter)
-        .with_line_terminator(PlSmallStr::from_str(&config.line_terminator));
+        .with_line_terminator(PlSmallStr::from_str(&config.line_terminator))
+        .with_quote_style(config.quote_style);
     if let Some(null_value) = config.null_value {
         writer = writer.with_null_value(PlSmallStr::from_str(&null_value));
     }
@@ -1658,6 +1837,49 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_full(
             include_header: has_header != 0,
             null_value: read_csv_null_value(null_value, delimiter)?,
             line_terminator: read_csv_line_terminator(line_terminator)?,
+            quote_style: QuoteStyle::Necessary,
+        };
+        write_csv_frame(&frame.df, &path, config)
+    }));
+    finish_write(result, err)
+}
+
+/// Writes a CSV file with delimiter, header, null-value, line-terminator, and
+/// quote-style controls.
+///
+/// The first five arguments have the same meaning as in
+/// [`pl_dataframe_write_csv_full`]. `quote_style` accepts `necessary` (the
+/// default when null or empty), `always`, `non_numeric`/`non-numeric`, and
+/// `never`, matched case-insensitively. `never` intentionally permits invalid
+/// CSV when a field contains the delimiter, quote, or a line break, matching
+/// Polars. This entry point is additive; earlier writer signatures and defaults
+/// are unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_csv_configured(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    null_value: *const c_char,
+    line_terminator: *const c_char,
+    quote_style: *const c_char,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let delimiter = read_delimiter(delimiter)?;
+        let quote_style_name = if quote_style.is_null() {
+            None
+        } else {
+            Some(read_utf8(quote_style, "quote_style")?)
+        };
+        let config = CsvWriteConfig {
+            delimiter,
+            include_header: has_header != 0,
+            null_value: read_csv_null_value(null_value, delimiter)?,
+            line_terminator: read_csv_line_terminator(line_terminator)?,
+            quote_style: parse_csv_quote_style(quote_style_name.as_deref())?,
         };
         write_csv_frame(&frame.df, &path, config)
     }));
@@ -1795,4 +2017,34 @@ pub unsafe extern "C" fn pl_dataframe_write_parquet_options(
         write_parquet_frame(&frame.df, &path, config)
     }));
     finish_write_with(result, err, "write_parquet")
+}
+
+/// Writes a frame as a JSON array or JSON Lines file.
+///
+/// `json_lines` is zero for a single JSON array and non-zero for one object per
+/// line. The file is created or truncated. Non-primitive Polars values are
+/// formatted by the Arrow JSON writer, matching `to_json`. This entry point is
+/// additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_json(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    json_lines: i32,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let file = File::create(path).map_err(|error| error.to_string())?;
+        let mut df = frame.df.clone();
+        JsonWriter::new(file)
+            .with_json_format(if json_lines != 0 {
+                JsonFormat::JsonLines
+            } else {
+                JsonFormat::Json
+            })
+            .finish(&mut df)
+            .map_err(|error| error.to_string())
+    }));
+    finish_write_with(result, err, "write_json")
 }
