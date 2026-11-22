@@ -115,6 +115,7 @@ test("head limits rows", function()
 end)
 local semicolon_fixture = root .. "/tests/fixtures/semicolon.csv"
 local pipe_fixture = root .. "/tests/fixtures/pipe_no_header.csv"
+local null_fixture = root .. "/tests/fixtures/null_values.csv"
 test("reads a CSV with a custom delimiter", function()
   local df = polars.read_csv(semicolon_fixture, { delimiter = ";" })
   eq(df:shape(), 5)
@@ -405,6 +406,95 @@ test("dtype override rejects unknown columns and unparsable values", function()
   truthy(tostring(err):find("parse", 1, true) or
     tostring(err):find("conversion", 1, true),
     "dtype parse error: " .. tostring(err))
+end)
+test("null_values marks matching fields null", function()
+  local default = polars.read_csv(null_fixture)
+  local default_rows = default:to_table()
+  eq(default_rows[1].note, "NA")
+  eq(default_rows[3].note, polars.null)
+  default:close()
+
+  local df = polars.read_csv(null_fixture, { null_values = "NA" })
+  eq(df:schema().note, "str")
+  local rows = df:to_table()
+  eq(rows[1].note, polars.null)
+  eq(rows[2].note, "missing")
+  eq(rows[3].note, polars.null)
+  eq(rows[4].note, "N/A")
+  eq(rows[5].note, "ok")
+  df:close()
+end)
+test("null_values accepts multiple markers", function()
+  local df = polars.read_csv(null_fixture, {
+    null_values = { "NA", "missing", "N/A" },
+  })
+  local rows = df:to_table()
+  eq(rows[1].note, polars.null)
+  eq(rows[2].note, polars.null)
+  eq(rows[3].note, polars.null)
+  eq(rows[4].note, polars.null)
+  eq(rows[5].note, "ok")
+  df:close()
+
+  local single = polars.read_csv(null_fixture, { null_values = { "NA" } })
+  eq(single:to_table()[1].note, polars.null)
+  eq(single:to_table()[2].note, "missing")
+  single:close()
+end)
+test("null_values combines with projection and dtype overrides", function()
+  local df = polars.read_csv(null_fixture, {
+    columns = { "score", "note" },
+    dtypes = { score = "f64" },
+    null_values = { "NA", "9" },
+  })
+  eq(table.concat(df:columns(), ","), "score,note")
+  eq(df:schema().score, "f64")
+  local rows = df:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[1].note, polars.null)
+  eq(rows[5].score, polars.null)
+  eq(rows[5].note, "ok")
+  df:close()
+end)
+test("null_values combines with quote, comment, delimiter, and headerless input", function()
+  local path = new_temp_path(".txt")
+  local file = assert(io.open(path, "w"))
+  file:write("# comment\n1|'NA'|10\n# skip\n2|'bia'|20\n3|'say | hi'|30\n")
+  file:close()
+  local df = polars.read_csv(path, {
+    delimiter = "|",
+    header = false,
+    quote = "'",
+    comment = "#",
+    null_values = "NA",
+  })
+  eq(df:shape(), 3)
+  local rows = df:to_table()
+  eq(rows[1].column_1, 1)
+  eq(rows[1].column_2, polars.null)
+  eq(rows[2].column_2, "bia")
+  eq(rows[3].column_2, "say | hi")
+  df:close()
+end)
+test("null_values rejects invalid values", function()
+  local cases = {
+    { 42, "null_values must be a non-empty string or a list" },
+    { true, "null_values must be a non-empty string or a list" },
+    { "", "null_values must not be empty" },
+    { {}, "null_values must not be empty" },
+    { { note = "NA" }, "null_values must be a non-empty string or a list" },
+    { { [1] = "NA", [3] = "missing" }, "contiguous list" },
+    { { 42 }, "entries must be non-empty strings" },
+    { { "" }, "entries must be non-empty strings" },
+    { { "NA", "" }, "entries must be non-empty strings" },
+    { { "NA", "NA" }, "duplicate read_csv null value 'NA'" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, null_fixture, { null_values = case[1] })
+    eq(ok, false, "invalid null_values accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
 end)
 test("select returns chosen columns in order", function()
   local df = polars.read_csv(fixture):select("name", "score")
@@ -796,6 +886,21 @@ test("CSV writer options round-trip delimiter and null value", function()
   eq(find_row(rows, { id = 2 }).note, 'say "hi"')
   eq(find_row(rows, { id = 3 }).note, "NA")
   loaded:close()
+  df:close()
+end)
+test("CSV writer null placeholder reads back as null with null_values", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  df:write_csv(out, { null_value = "NA" })
+
+  local literal = polars.read_csv(out)
+  eq(find_row(literal:to_table(), { id = 3 }).note, "NA")
+  literal:close()
+
+  local nulled = polars.read_csv(out, { null_values = "NA" })
+  eq(find_row(nulled:to_table(), { id = 3 }).note, polars.null)
+  eq(find_row(nulled:to_table(), { id = 1 }).note, "hello, world")
+  nulled:close()
   df:close()
 end)
 test("CSV writer header option writes headerless output", function()
