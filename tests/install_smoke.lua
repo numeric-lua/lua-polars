@@ -47,6 +47,17 @@ check(table.concat(typed:columns(), ",") == "score,name",
 check(typed:to_table()[1].score == 10, "unexpected typed value")
 typed:close()
 
+local nulled = polars.read_csv(fixture, {
+  columns = { "score", "name" },
+  null_values = { "10", "7" },
+})
+check(nulled:schema().score == "i64", "unexpected null_values schema")
+local nulled_rows = nulled:to_table()
+check(nulled_rows[1].score == polars.null, "10 was not read as null")
+check(nulled_rows[2].score == polars.null, "7 was not read as null")
+check(nulled_rows[3].score == 12, "unmatched score changed")
+nulled:close()
+
 local roundtrip_fixture = fixture:gsub("sample%.csv$", "roundtrip.csv")
 local written = os.tmpname()
 os.remove(written)
@@ -66,6 +77,14 @@ check(select(1, reloaded:shape()) == 3, "unexpected writer round-trip rows")
 check(reloaded:to_table()[3].column_3 == "NA",
   "null placeholder did not read back literally")
 reloaded:close()
+local nulled_writer = polars.read_csv(written, {
+  delimiter = ";",
+  header = false,
+  null_values = "NA",
+})
+check(nulled_writer:to_table()[3].column_3 == polars.null,
+  "null placeholder did not read back as null")
+nulled_writer:close()
 writer:close()
 os.remove(written)
 
