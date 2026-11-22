@@ -33,6 +33,13 @@ PlFrame *pl_dataframe_read_csv_null_values(
     const char *const *columns, uint64_t column_count,
     const char *const *dtypes, uint64_t dtype_count,
     const char *const *null_values, uint64_t null_value_count, char **err);
+PlFrame *pl_dataframe_read_csv_row_window(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    uint64_t skip_rows, int64_t n_rows, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -617,6 +624,8 @@ local CSV_OPTION_KEYS = {
   columns = true,
   dtypes = true,
   null_values = true,
+  skip_rows = true,
+  n_rows = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -760,9 +769,37 @@ local function csv_null_values(value)
   return result, #result
 end
 
+-- Polars' row window counts are CSV rows, not Lua table indices: skip_rows
+-- drops rows before the header is parsed, while n_rows limits data rows after
+-- it. Both are non-negative safe integers. An absent n_rows becomes the ABI's
+-- -1 sentinel for "read every remaining row".
+local CSV_MAX_SAFE_INTEGER = 9007199254740991
+
+local function csv_row_window(options)
+  if options == nil then
+    return 0, -1, false
+  end
+  local requested = options.skip_rows ~= nil or options.n_rows ~= nil
+  local skip_rows = options.skip_rows
+  if skip_rows == nil then skip_rows = 0 end
+  if type(skip_rows) ~= "number" or skip_rows < 0 or skip_rows % 1 ~= 0 or
+      skip_rows > CSV_MAX_SAFE_INTEGER then
+    error("read_csv skip_rows must be a non-negative integer", 3)
+  end
+  local n_rows = options.n_rows
+  if n_rows == nil then
+    return skip_rows, -1, requested
+  end
+  if type(n_rows) ~= "number" or n_rows < 0 or n_rows % 1 ~= 0 or
+      n_rows > CSV_MAX_SAFE_INTEGER then
+    error("read_csv n_rows must be a non-negative integer", 3)
+  end
+  return skip_rows, n_rows, requested
+end
+
 local function csv_options(options)
   if options == nil then
-    return ",", true, '"', "", nil, nil, 0, nil, 0
+    return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -787,8 +824,9 @@ local function csv_options(options)
   local columns = csv_columns(options.columns)
   local dtypes, dtype_count = csv_dtypes(options.dtypes)
   local null_values, null_value_count = csv_null_values(options.null_values)
+  local skip_rows, n_rows, window_requested = csv_row_window(options)
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
-    null_values, null_value_count
+    null_values, null_value_count, skip_rows, n_rows, window_requested
 end
 
 function polars.read_csv(path, options)
@@ -796,7 +834,8 @@ function polars.read_csv(path, options)
     error("read_csv path must be a non-empty string", 2)
   end
   local delimiter, header, quote, comment, columns, dtypes, dtype_count,
-    null_values, null_value_count = csv_options(options)
+    null_values, null_value_count, skip_rows, n_rows, window_requested =
+    csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -812,12 +851,20 @@ function polars.read_csv(path, options)
       dtype_pairs[index - 1] = value
     end
   end
-  local pointer
+  local markers
   if null_values ~= nil then
-    local markers = ffi.new("const char *[?]", #null_values)
+    markers = ffi.new("const char *[?]", #null_values)
     for index, value in ipairs(null_values) do
       markers[index - 1] = value
     end
+  end
+  local pointer
+  if window_requested then
+    pointer = lib.pl_dataframe_read_csv_row_window(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, skip_rows, n_rows,
+      err)
+  elseif null_values ~= nil then
     pointer = lib.pl_dataframe_read_csv_null_values(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, markers, null_value_count, err)

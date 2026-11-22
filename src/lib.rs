@@ -49,6 +49,8 @@ struct CsvReadConfig {
     columns: Option<Vec<String>>,
     dtypes: Option<Vec<(String, DataType)>>,
     null_values: Option<Vec<String>>,
+    skip_rows: usize,
+    n_rows: Option<usize>,
 }
 
 impl Default for CsvReadConfig {
@@ -61,6 +63,8 @@ impl Default for CsvReadConfig {
             columns: None,
             dtypes: None,
             null_values: None,
+            skip_rows: 0,
+            n_rows: None,
         }
     }
 }
@@ -387,6 +391,8 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
     });
     let frame = CsvReadOptions::default()
         .with_has_header(config.has_header)
+        .with_skip_rows(config.skip_rows)
+        .with_n_rows(config.n_rows)
         .with_columns(columns)
         .with_schema_overwrite(schema_overwrite)
         .map_parse_options(|options| {
@@ -584,6 +590,7 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_ex(
             columns: None,
             dtypes: None,
             null_values: None,
+            ..CsvReadConfig::default()
         };
         read_csv_frame(&path, config)
     }));
@@ -622,6 +629,7 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_projected(
             columns: read_csv_columns(columns, column_count)?,
             dtypes: None,
             null_values: None,
+            ..CsvReadConfig::default()
         };
         read_csv_frame(&path, config)
     }));
@@ -669,6 +677,7 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_typed(
             columns: read_csv_columns(columns, column_count)?,
             dtypes: read_csv_dtypes(dtypes, dtype_count)?,
             null_values: None,
+            ..CsvReadConfig::default()
         };
         read_csv_frame(&path, config)
     }));
@@ -715,6 +724,67 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_null_values(
             columns: read_csv_columns(columns, column_count)?,
             dtypes: read_csv_dtypes(dtypes, dtype_count)?,
             null_values: read_csv_null_values(null_values, null_value_count)?,
+            ..CsvReadConfig::default()
+        };
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with every earlier reader option plus a row window.
+///
+/// `skip_rows` is the number of CSV rows skipped before the header is parsed
+/// (Polars' `skip_rows`; comments and quoting are respected while skipping).
+/// `n_rows` limits the number of data rows read after the header; `-1` reads
+/// every remaining row and other negative values are errors. A window of
+/// `skip_rows = 0`, `n_rows = -1` matches the earlier defaults.
+///
+/// `columns`, `dtypes`, and `null_values` have the same meaning as in
+/// [`pl_dataframe_read_csv_null_values`]. This entry point is additive; the
+/// earlier reader signatures and defaults are unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_row_window(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let skip_rows = usize::try_from(skip_rows)
+            .map_err(|_| "CSV skip_rows is too large for this platform".to_string())?;
+        let n_rows = if n_rows == -1 {
+            None
+        } else if n_rows < 0 {
+            return Err(format!(
+                "CSV n_rows must be -1 to read all rows or a non-negative count, got {n_rows}"
+            ));
+        } else {
+            Some(
+                usize::try_from(n_rows)
+                    .map_err(|_| "CSV n_rows is too large for this platform".to_string())?,
+            )
+        };
+        let config = CsvReadConfig {
+            delimiter: read_delimiter(delimiter)?,
+            has_header: has_header != 0,
+            quote: read_csv_quote(quote)?,
+            comment: read_csv_comment(comment)?,
+            columns: read_csv_columns(columns, column_count)?,
+            dtypes: read_csv_dtypes(dtypes, dtype_count)?,
+            null_values: read_csv_null_values(null_values, null_value_count)?,
+            skip_rows,
+            n_rows,
         };
         read_csv_frame(&path, config)
     }));
