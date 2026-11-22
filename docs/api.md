@@ -180,6 +180,29 @@ end
 Returns a new frame with at most `n` rows. Negative or non-integer values are
 rejected.
 
+### `df:tail(n) -> DataFrame`
+
+Returns a new frame with at most the last `n` rows. `n` defaults to `5`, `0`
+returns an empty frame with the same schema, and a count larger than the frame
+returns every row. Negative, fractional, non-numeric, and above-`2^53 - 1`
+counts are rejected.
+
+```lua
+local latest = df:tail(10)
+```
+
+### `df:slice(offset, length) -> DataFrame`
+
+Returns `length` rows starting at `offset`. A negative offset counts from the
+end, so `df:slice(-2, 2)` returns the last two rows; an offset outside the frame
+returns an empty frame with the same schema. `length` must be a non-negative
+integer. Both arguments must be integers and at most `2^53 - 1` in magnitude.
+
+```lua
+local page = df:slice(20, 10)
+local last_two = df:slice(-2, 2)
+```
+
 ### `df:sql(query) -> DataFrame`
 
 Runs a Polars SQL query with the current frame registered as table `df`. The
@@ -438,6 +461,9 @@ int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
 char *pl_dataframe_columns_json(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
+PlFrame *pl_dataframe_tail(PlFrame *frame, int64_t n, char **err);
+PlFrame *pl_dataframe_slice(
+    PlFrame *frame, int64_t offset, uint64_t length, char **err);
 PlFrame *pl_dataframe_join(
     PlFrame *left, PlFrame *right, const char *how,
     const char *const *left_on, uint64_t left_count,

@@ -113,6 +113,96 @@ test("head limits rows", function()
   eq(rows, 2)
   df:close()
 end)
+test("tail limits rows from the end", function()
+  local df = polars.read_csv(fixture)
+  local tail = df:tail(2)
+  eq(tail:shape(), 2)
+  eq(table.concat(tail:columns(), ","), table.concat(df:columns(), ","))
+  local rows = tail:to_table()
+  eq(rows[1].name, "duda")
+  eq(rows[1].score, 5)
+  eq(rows[2].name, "eva")
+  eq(rows[2].score, 9)
+  tail:close()
+
+  local default = df:tail()
+  eq(default:shape(), 5)
+  default:close()
+  local empty = df:tail(0)
+  eq(empty:shape(), 0)
+  eq(#empty:columns(), 4)
+  empty:close()
+  local over = df:tail(100)
+  eq(over:shape(), 5)
+  over:close()
+  df:close()
+end)
+test("slice returns a row window and supports negative offsets", function()
+  local df = polars.read_csv(fixture)
+  local window = df:slice(1, 2)
+  eq(window:shape(), 2)
+  local rows = window:to_table()
+  eq(rows[1].name, "bia")
+  eq(rows[1].score, 7)
+  eq(rows[2].name, "caio")
+  eq(rows[2].score, 12)
+  window:close()
+
+  local from_end = df:slice(-2, 2)
+  eq(from_end:shape(), 2)
+  rows = from_end:to_table()
+  eq(rows[1].name, "duda")
+  eq(rows[2].name, "eva")
+  from_end:close()
+
+  local empty = df:slice(0, 0)
+  eq(empty:shape(), 0)
+  eq(#empty:columns(), 4)
+  empty:close()
+  local past = df:slice(100, 2)
+  eq(past:shape(), 0)
+  eq(#past:columns(), 4)
+  past:close()
+  df:close()
+end)
+test("tail and slice reject invalid counts", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { "tail", -1, "tail count" },
+    { "tail", 1.5, "tail count" },
+    { "tail", "2", "tail count" },
+    { "tail", true, "tail count" },
+    { "tail", math.huge, "tail count" },
+    { "tail", 2 ^ 53, "tail count" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df[case[1]](df, case[2]) end)
+    eq(ok, false, "invalid " .. case[1] .. " count accepted")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  local offset_cases = {
+    { 1.5, 1, "offset" },
+    { "0", 1, "offset" },
+    { 0, -1, "length" },
+    { 0, 1.5, "length" },
+    { 0, "1", "length" },
+    { 0, math.huge, "length" },
+    { 0, 2 ^ 53, "length" },
+  }
+  for _, case in ipairs(offset_cases) do
+    local ok, err = pcall(function()
+      df:slice(case[1], case[2])
+    end)
+    eq(ok, false, "invalid slice arguments accepted")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:tail(1) end)
+  eq(ok, false, "closed tail accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed tail error")
+end)
 local semicolon_fixture = root .. "/tests/fixtures/semicolon.csv"
 local pipe_fixture = root .. "/tests/fixtures/pipe_no_header.csv"
 local null_fixture = root .. "/tests/fixtures/null_values.csv"

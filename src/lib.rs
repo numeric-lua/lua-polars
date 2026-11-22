@@ -1391,6 +1391,45 @@ pub unsafe extern "C" fn pl_dataframe_head(
     finish_frame(result, err)
 }
 
+/// Returns the last `n` rows of a frame, or all rows when `n` exceeds the
+/// height. A negative count is rejected. This entry point is additive; the
+/// existing head behavior is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_tail(
+    ptr: *mut PlFrame,
+    n: i64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        if n < 0 {
+            return Err("tail count must be non-negative".to_string());
+        }
+        Ok(frame.df.tail(Some(n as usize)))
+    }));
+    finish_frame(result, err)
+}
+
+/// Returns `length` rows starting at `offset`. A negative offset counts from
+/// the end of the frame, matching Polars' eager slice semantics; an offset
+/// outside the frame returns an empty frame with the same schema. The length
+/// is an unsigned row count and must fit this platform's `usize`.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_slice(
+    ptr: *mut PlFrame,
+    offset: i64,
+    length: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let length = usize::try_from(length)
+            .map_err(|_| "slice length is too large for this platform".to_string())?;
+        Ok(frame.df.slice(offset, length))
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_join(
     left_ptr: *mut PlFrame,

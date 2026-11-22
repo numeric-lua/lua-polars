@@ -75,6 +75,9 @@ int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
 char *pl_dataframe_columns_json(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
+PlFrame *pl_dataframe_tail(PlFrame *frame, int64_t n, char **err);
+PlFrame *pl_dataframe_slice(
+    PlFrame *frame, int64_t offset, uint64_t length, char **err);
 PlFrame *pl_dataframe_join(
     PlFrame *left, PlFrame *right, const char *how,
     const char *const *left_on, uint64_t left_count,
@@ -238,11 +241,41 @@ end
 
 function DataFrame:head(count)
   count = count == nil and 5 or count
-  if type(count) ~= "number" or count < 0 or count % 1 ~= 0 then
+  if type(count) ~= "number" or count < 0 or count % 1 ~= 0 or
+      count > 9007199254740991 then
     error("head count must be a non-negative integer", 2)
   end
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_head(self:_require_open(), count, err)
+  return new_frame(pointer, err)
+end
+
+function DataFrame:tail(count)
+  count = count == nil and 5 or count
+  if type(count) ~= "number" or count < 0 or count % 1 ~= 0 or
+      count > 9007199254740991 then
+    error("tail count must be a non-negative integer", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_tail(self:_require_open(), count, err)
+  return new_frame(pointer, err)
+end
+
+-- A negative offset counts from the end, matching Polars' eager slice. The
+-- length is a row count and never negative; an offset past either end yields
+-- an empty frame with the same schema instead of an error.
+function DataFrame:slice(offset, length)
+  if type(offset) ~= "number" or offset % 1 ~= 0 or
+      offset < -9007199254740991 or offset > 9007199254740991 then
+    error("slice offset must be an integer", 2)
+  end
+  if type(length) ~= "number" or length < 0 or length % 1 ~= 0 or
+      length > 9007199254740991 then
+    error("slice length must be a non-negative integer", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_slice(self:_require_open(), offset, length,
+    err)
   return new_frame(pointer, err)
 end
 
