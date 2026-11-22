@@ -26,8 +26,10 @@
   malformed reader/writer options, missing files, closed frames, filesystem
   failures, and the installed-tree path through the prefix smoke test;
 - `./scripts/test.sh` passed 107 tests and `./scripts/smoke.sh` passed the
-  installed-prefix check; the LuaRocks source-rock check is performed during
-  release preparation;
+  installed-prefix check; `./scripts/rockspec.sh` built the local crate
+  incrementally, installed the 0.16.0-1 rock through LuaRocks, and loaded it,
+  and a repeated check reused the bridge and content stamp without a Cargo
+  rebuild;
 - no tag or package publish is performed for this release.
 
 ## 0.15.0
