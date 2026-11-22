@@ -58,6 +58,22 @@ check(nulled_rows[2].score == polars.null, "7 was not read as null")
 check(nulled_rows[3].score == 12, "unmatched score changed")
 nulled:close()
 
+local per_column = polars.read_csv(fixture, {
+  columns = { "score", "name" },
+  dtypes = { score = "f64" },
+  null_values = { score = "10", name = "eva" },
+})
+check(per_column:schema().score == "f64",
+  "unexpected per-column null dtype")
+local per_column_rows = per_column:to_table()
+check(per_column_rows[1].score == polars.null,
+  "per-column score marker mismatch")
+check(per_column_rows[1].name == "ana", "per-column name changed")
+check(per_column_rows[2].score == 7, "per-column unmatched score changed")
+check(per_column_rows[5].name == polars.null,
+  "per-column name marker mismatch")
+per_column:close()
+
 local windowed = polars.read_csv(fixture, {
   columns = { "score", "name" },
   dtypes = { score = "f64" },

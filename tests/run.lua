@@ -441,6 +441,100 @@ test("null_values accepts multiple markers", function()
   eq(single:to_table()[2].note, "missing")
   single:close()
 end)
+test("per-column null_values mark only their column", function()
+  local df = polars.read_csv(null_fixture, {
+    null_values = { note = "NA" },
+  })
+  eq(df:schema().note, "str")
+  local rows = df:to_table()
+  eq(rows[1].note, polars.null)
+  eq(rows[1].name, "ana")
+  eq(rows[2].note, "missing")
+  eq(rows[3].note, polars.null)
+  eq(rows[4].note, "N/A")
+  eq(rows[5].note, "ok")
+  df:close()
+
+  local scoped = polars.read_csv(null_fixture, {
+    null_values = { name = "NA" },
+  })
+  rows = scoped:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].note, "NA")
+  eq(scoped:schema().note, "str")
+  scoped:close()
+end)
+test("per-column null_values combine with projection, dtypes, renames, and row windows", function()
+  local df = polars.read_csv(null_fixture, {
+    columns = { "score", "note" },
+    dtypes = { score = "f64" },
+    null_values = { score = "9", note = "NA" },
+    n_rows = 5,
+    rename_columns = { "points", "label" },
+  })
+  eq(df:shape(), 5)
+  eq(table.concat(df:columns(), ","), "points,label")
+  eq(df:schema().points, "f64")
+  local rows = df:to_table()
+  eq(rows[1].label, polars.null)
+  eq(rows[1].points, 10)
+  eq(rows[2].label, "missing")
+  eq(rows[3].label, polars.null)
+  eq(rows[4].label, "N/A")
+  eq(rows[5].label, "ok")
+  eq(rows[5].points, polars.null)
+  df:close()
+end)
+test("per-column null_values combine with lossy decoding", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "wb"))
+  file:write("id,note,score\n1,caf\233,10\n2,NA,20\n3,ok,NA\n")
+  file:close()
+  local df = polars.read_csv(path, {
+    encoding = "utf8-lossy",
+    null_values = { note = "NA" },
+  })
+  eq(df:shape(), 3)
+  local rows = df:to_table()
+  eq(rows[1].note, "caf\239\191\189")
+  eq(rows[2].note, polars.null)
+  eq(rows[3].note, "ok")
+  eq(rows[3].score, "NA")
+  df:close()
+end)
+test("per-column null_values reject malformed maps and unknown columns", function()
+  local cases = {
+    { { [1] = "NA", note = "NA" }, "either a list of markers or a table" },
+    { { [0] = "NA" }, "positive integers" },
+    { { [1.5] = "NA" }, "positive integers" },
+    { { [true] = "NA" }, "keys must be column names or list indices" },
+    { { [""] = "NA" }, "column names must be non-empty strings" },
+    { { note = 42 }, "markers must be non-empty strings" },
+    { { note = "" }, "markers must be non-empty strings" },
+    { { note = { "NA" } }, "markers must be non-empty strings" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, null_fixture, { null_values = case[1] })
+    eq(ok, false, "invalid named null_values accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+
+  local ok, err = pcall(polars.read_csv, null_fixture, {
+    columns = { "score" },
+    null_values = { note = "NA" },
+  })
+  eq(ok, false, "null marker outside the projection accepted")
+  truthy(tostring(err):find("not in the projection", 1, true),
+    "projected null marker error: " .. tostring(err))
+
+  ok, err = pcall(polars.read_csv, null_fixture, {
+    null_values = { nope = "NA" },
+  })
+  eq(ok, false, "null marker for an unknown column accepted")
+  truthy(tostring(err):find("unable to find column", 1, true),
+    "unknown null marker error: " .. tostring(err))
+end)
 test("null_values combines with projection and dtype overrides", function()
   local df = polars.read_csv(null_fixture, {
     columns = { "score", "note" },
@@ -482,7 +576,6 @@ test("null_values rejects invalid values", function()
     { true, "null_values must be a non-empty string or a list" },
     { "", "null_values must not be empty" },
     { {}, "null_values must not be empty" },
-    { { note = "NA" }, "null_values must be a non-empty string or a list" },
     { { [1] = "NA", [3] = "missing" }, "contiguous list" },
     { { 42 }, "entries must be non-empty strings" },
     { { "" }, "entries must be non-empty strings" },
