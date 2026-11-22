@@ -1,21 +1,20 @@
-# lua-polars 0.11.0
+# lua-polars 0.12.0
 
-- `df:write_csv(path, options)` accepts a one-byte `delimiter`, omits the
-  header row with `header = false`, and writes a literal `null_value`
-  placeholder for null fields; the default stays comma/header/empty null;
-- the additive `pl_dataframe_write_csv_options` C ABI carries the writer
-  settings; `pl_dataframe_write_csv` keeps its signature and defaults;
-- unknown fields, a non-boolean `header`, invalid one-byte delimiters, and a
-  `null_value` containing the delimiter, `"`, NUL, newline, or carriage return
-  are rejected before the file is written;
-- tests cover semicolon and headerless round-trips, the literal null
-  placeholder, unchanged default bytes, option validation, closed-frame and
-  filesystem errors, and the installed-tree writer path;
-- `scripts/rockspec.sh` now validates against the ignored `.luarocks-tree/`
-  directory by default and skips `luarocks make` while the content stamp
-  matches; `POLARS_LUA_ROCK_TREE` selects another tree and
-  `POLARS_LUA_ROCK_FORCE=1` forces a reinstall;
-- `scripts/check-version.sh` cross-checks `Cargo.toml`, `Cargo.lock`,
-  `polars.lua`, the rockspec name/version/tag, README, API docs, and release
-  notes; `scripts/rockspec.sh` runs it before installing;
-- 73 tests.
+- `polars.read_csv(path, options)` accepts `null_values`, a literal marker
+  string or a non-empty list of markers that are read as null in every column;
+  markers are compared after surrounding CSV quotes are removed, and empty
+  fields stay null by default;
+- the additive `pl_dataframe_read_csv_null_values` C ABI combines the full
+  reader configuration (delimiter, header, quote, comment, projection, and
+  dtype overrides) with the markers; earlier reader entry points keep their
+  signatures and defaults;
+- invalid option types, empty markers, empty lists, non-string entries, sparse
+  lists, and duplicate markers are rejected before the file is read;
+- tests cover single and multiple markers, quote/comment/delimiter/headerless
+  combinations, projection and dtype overrides, writer round-trips, and error
+  paths, including the installed-tree smoke test through both the prefix and
+  LuaRocks layouts;
+- `./scripts/test.sh`, `./scripts/smoke.sh`, and `./scripts/rockspec.sh` were
+  run for the release; a repeated LuaRocks check reused the unchanged content
+  stamp without a Cargo rebuild;
+- 79 tests.
