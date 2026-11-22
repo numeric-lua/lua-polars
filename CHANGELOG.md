@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15.0
 
 - `polars.read_csv(path, options)` accepts `null_values` as a table mapping
   column names to one marker each; named markers are read as null only in
@@ -20,6 +20,10 @@
   marker outside the projection, and an unknown marker column; the
   installed-tree smoke test exercises per-column markers through both the
   prefix and LuaRocks layouts;
+- `./scripts/test.sh`, `./scripts/smoke.sh`, and `./scripts/rockspec.sh` were
+  run for the release; the LuaRocks check reused the native bridge, and a
+  repeated check reused the installed tree without a Cargo rebuild;
+- no tag or package publish was performed for this release;
 - 99 tests.
 
 ## 0.14.0

@@ -1,30 +1,26 @@
-# lua-polars 0.14.0
+# lua-polars 0.15.0
 
-- `polars.read_csv(path, options)` accepts `rename_columns`, a non-empty,
-  contiguous list of replacement names applied positionally to the columns of
-  the returned frame; fewer names rename a prefix, and the option composes with
-  projection, dtype overrides, null markers, and the row window;
-- `polars.read_csv(path, options)` accepts `encoding = "utf8"` (default) or
-  `"utf8-lossy"`, matched case-insensitively; lossy mode replaces invalid UTF-8
-  bytes with `U+FFFD` instead of failing the read;
-- the additive `pl_dataframe_read_csv_encoded` C ABI entry point combines the
-  row window and every earlier reader option with the encoding, and the
-  additive `pl_dataframe_read_csv_renamed` entry point adds the positional
-  rename list; earlier reader entry points keep their signatures and defaults;
-- `df:write_csv(path, options)` accepts `line_terminator`, either `"\n"` (the
-  default) or `"\r\n"`; the additive `pl_dataframe_write_csv_full` C ABI entry
-  point combines it with the delimiter, header, and null-value writer options,
-  and earlier writer entry points keep their signatures and defaults;
-- invalid encodings, malformed rename lists, rename results that collide with
-  an existing or duplicate column name, more rename names than the frame has
-  columns, and unsupported line terminators are rejected with explicit errors;
-- tests cover positional renames on headed and headerless input, rename
-  collisions and width errors, strict and lossy decoding with replacement-byte
-  assertions, combinations with projection/dtypes/null markers/row windows, and
-  CRLF output round-trips through the reader; the installed-tree smoke test
-  exercises the new options through both the prefix and LuaRocks layouts;
-- `./scripts/test.sh` passed 95 tests, `./scripts/smoke.sh` passed the
+- `polars.read_csv(path, options)` accepts `null_values` as a table mapping
+  column names to one marker each; a named marker is read as null only in its
+  own column, empty fields remain null in every column, and the map composes
+  with projection, dtype overrides, positional renames, the row window, and
+  UTF-8 lossy decoding;
+- the additive `pl_dataframe_read_csv_named_nulls` C ABI entry point combines
+  every earlier reader option, including the encoding and positional rename
+  list, with parallel `null_columns`/`null_values` arrays; earlier reader entry
+  points keep their signatures and defaults;
+- malformed per-column maps (mixed list and column keys, non-string keys,
+  empty column names, and non-string or empty markers), markers outside the
+  projection, and markers naming columns absent from the file are rejected
+  with explicit errors; markers name the file's original columns because they
+  are applied before positional renames;
+- tests cover per-column scoping, empty-field nulls, combinations with
+  projection/dtypes/renames/row windows/lossy decoding, malformed maps, a
+  marker outside the projection, and an unknown marker column; the
+  installed-tree smoke test exercises per-column markers through both the
+  prefix and LuaRocks layouts;
+- `./scripts/test.sh` passed 99 tests, `./scripts/smoke.sh` passed the
   installed-prefix check, and `./scripts/rockspec.sh` installed the checkout
-  through LuaRocks and loaded it; a repeated LuaRocks check reused the unchanged
-  content stamp without a Cargo rebuild;
+  through LuaRocks and loaded it; a repeated LuaRocks check reused the
+  unchanged content stamp without a Cargo rebuild;
 - no tag or package publish was performed for this release.
