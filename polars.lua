@@ -40,6 +40,22 @@ PlFrame *pl_dataframe_read_csv_row_window(
     const char *const *dtypes, uint64_t dtype_count,
     const char *const *null_values, uint64_t null_value_count,
     uint64_t skip_rows, int64_t n_rows, char **err);
+PlFrame *pl_dataframe_read_csv_encoded(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    uint64_t skip_rows, int64_t n_rows, const char *encoding, char **err);
+PlFrame *pl_dataframe_read_csv_renamed(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    uint64_t skip_rows, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -622,10 +638,12 @@ local CSV_OPTION_KEYS = {
   quote = true,
   comment = true,
   columns = true,
+  rename_columns = true,
   dtypes = true,
   null_values = true,
   skip_rows = true,
   n_rows = true,
+  encoding = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -769,6 +787,69 @@ local function csv_null_values(value)
   return result, #result
 end
 
+-- Replacement names are positional and replace the leading columns of the
+-- frame that would otherwise be returned. Like columns/null_values, the table
+-- must be a contiguous list; it is applied after projection and dtype
+-- overrides, so it renames the columns the caller actually receives.
+local function csv_rename_columns(value)
+  if value == nil then
+    return nil
+  end
+  if type(value) ~= "table" then
+    error("read_csv rename_columns must be a non-empty list of column names", 3)
+  end
+  local keys = {}
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      error("read_csv rename_columns must be a non-empty list of column names", 3)
+    end
+    keys[#keys + 1] = key
+  end
+  if #keys == 0 then
+    error("read_csv rename_columns must not be empty", 3)
+  end
+  table.sort(keys)
+  for index, key in ipairs(keys) do
+    if key ~= index then
+      error("read_csv rename_columns must be a contiguous list of strings", 3)
+    end
+  end
+  local seen = {}
+  local result = {}
+  for index = 1, #keys do
+    local name = value[index]
+    if type(name) ~= "string" or name == "" then
+      error("read_csv rename_columns entries must be non-empty strings", 3)
+    end
+    if seen[name] then
+      error("duplicate read_csv column name '" .. name .. "'", 3)
+    end
+    seen[name] = true
+    result[index] = name
+  end
+  return result
+end
+
+-- Strict UTF-8 is the default and matches the pre-encoding behavior. The lossy
+-- mode is opt-in because it changes invalid bytes to U+FFFD instead of failing
+-- the read; names are matched case-insensitively like dtype aliases.
+local function csv_encoding(value)
+  if value == nil then
+    return nil
+  end
+  if type(value) ~= "string" then
+    error("read_csv encoding must be 'utf8' or 'utf8-lossy'", 3)
+  end
+  local normalized = value:lower()
+  if normalized == "utf8" then
+    return "utf8"
+  end
+  if normalized == "utf8-lossy" then
+    return "utf8-lossy"
+  end
+  error("read_csv encoding must be 'utf8' or 'utf8-lossy'", 3)
+end
+
 -- Polars' row window counts are CSV rows, not Lua table indices: skip_rows
 -- drops rows before the header is parsed, while n_rows limits data rows after
 -- it. Both are non-negative safe integers. An absent n_rows becomes the ABI's
@@ -799,7 +880,7 @@ end
 
 local function csv_options(options)
   if options == nil then
-    return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false
+    return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -822,11 +903,14 @@ local function csv_options(options)
   local quote = csv_byte_option(options, "quote", '"')
   local comment = csv_byte_option(options, "comment", "")
   local columns = csv_columns(options.columns)
+  local rename_columns = csv_rename_columns(options.rename_columns)
   local dtypes, dtype_count = csv_dtypes(options.dtypes)
   local null_values, null_value_count = csv_null_values(options.null_values)
   local skip_rows, n_rows, window_requested = csv_row_window(options)
+  local encoding = csv_encoding(options.encoding)
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
-    null_values, null_value_count, skip_rows, n_rows, window_requested
+    null_values, null_value_count, skip_rows, n_rows, window_requested,
+    rename_columns, encoding
 end
 
 function polars.read_csv(path, options)
@@ -834,8 +918,8 @@ function polars.read_csv(path, options)
     error("read_csv path must be a non-empty string", 2)
   end
   local delimiter, header, quote, comment, columns, dtypes, dtype_count,
-    null_values, null_value_count, skip_rows, n_rows, window_requested =
-    csv_options(options)
+    null_values, null_value_count, skip_rows, n_rows, window_requested,
+    rename_columns, encoding = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -858,8 +942,25 @@ function polars.read_csv(path, options)
       markers[index - 1] = value
     end
   end
+  local renames
+  if rename_columns ~= nil then
+    renames = ffi.new("const char *[?]", #rename_columns)
+    for index, value in ipairs(rename_columns) do
+      renames[index - 1] = value
+    end
+  end
   local pointer
-  if window_requested then
+  if rename_columns ~= nil then
+    pointer = lib.pl_dataframe_read_csv_renamed(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, skip_rows, n_rows,
+      renames, #rename_columns, encoding, err)
+  elseif encoding ~= nil then
+    pointer = lib.pl_dataframe_read_csv_encoded(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, skip_rows, n_rows,
+      encoding, err)
+  elseif window_requested then
     pointer = lib.pl_dataframe_read_csv_row_window(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, markers, null_value_count, skip_rows, n_rows,

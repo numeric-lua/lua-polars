@@ -49,8 +49,10 @@ struct CsvReadConfig {
     columns: Option<Vec<String>>,
     dtypes: Option<Vec<(String, DataType)>>,
     null_values: Option<Vec<String>>,
+    rename_columns: Option<Vec<String>>,
     skip_rows: usize,
     n_rows: Option<usize>,
+    encoding: CsvEncoding,
 }
 
 impl Default for CsvReadConfig {
@@ -63,8 +65,10 @@ impl Default for CsvReadConfig {
             columns: None,
             dtypes: None,
             null_values: None,
+            rename_columns: None,
             skip_rows: 0,
             n_rows: None,
+            encoding: CsvEncoding::Utf8,
         }
     }
 }
@@ -324,6 +328,102 @@ unsafe fn read_csv_null_values(
     Ok(Some(values))
 }
 
+/// Reads optional positional replacement names from the C ABI.
+///
+/// `ptr` points to `count` UTF-8 names that replace the leading column names
+/// after the file is read. A null pointer or a zero count disables renaming.
+/// Empty names and duplicates are rejected eagerly; the read frame width is
+/// checked later because it is not known until the header is parsed.
+unsafe fn read_csv_rename_columns(
+    ptr: *const *const c_char,
+    count: u64,
+) -> Result<Option<Vec<String>>, String> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if ptr.is_null() {
+        return Err("CSV rename columns are null".to_string());
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| "CSV rename column count is too large".to_string())?;
+    let raw = std::slice::from_raw_parts(ptr, count);
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::with_capacity(count);
+    for (index, &name_ptr) in raw.iter().enumerate() {
+        let name = read_utf8(name_ptr, &format!("CSV rename column at index {index}"))?;
+        if name.is_empty() {
+            return Err(format!(
+                "CSV rename column at index {index} must not be empty"
+            ));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate CSV rename column '{name}'"));
+        }
+        names.push(name);
+    }
+    Ok(Some(names))
+}
+
+/// Reads the optional CSV text encoding from the C ABI.
+///
+/// A null pointer or an empty string keeps strict UTF-8. `utf8-lossy` replaces
+/// invalid UTF-8 bytes with the Unicode replacement character instead of
+/// failing the read; other names are rejected. Matching is case-insensitive so
+/// the Lua wrapper and direct ABI callers behave the same.
+unsafe fn read_csv_encoding(ptr: *const c_char) -> Result<CsvEncoding, String> {
+    if ptr.is_null() {
+        return Ok(CsvEncoding::Utf8);
+    }
+    let value = read_utf8(ptr, "encoding")?;
+    match value.to_ascii_lowercase().as_str() {
+        "" | "utf8" => Ok(CsvEncoding::Utf8),
+        "utf8-lossy" => Ok(CsvEncoding::LossyUtf8),
+        _ => Err(format!(
+            "unsupported CSV encoding '{value}'; expected utf8 or utf8-lossy"
+        )),
+    }
+}
+
+/// Applies positional column renames to a frame and rejects duplicate names.
+///
+/// Polars' eager CSV reader does not consume its `column_names_overwrite`
+/// option, so the bridge renames the parsed frame instead. Renaming is applied
+/// after projection, so the names replace the columns the caller receives.
+fn rename_csv_frame(frame: DataFrame, names: &[String]) -> Result<DataFrame, String> {
+    if names.is_empty() {
+        return Ok(frame);
+    }
+    let width = frame.width();
+    if names.len() > width {
+        return Err(format!(
+            "CSV rename_columns has {} names but the frame has {width} columns",
+            names.len()
+        ));
+    }
+    let mut final_names: Vec<String> = frame
+        .get_column_names()
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    for (index, name) in names.iter().enumerate() {
+        final_names[index] = name.clone();
+    }
+    let mut seen = std::collections::HashSet::new();
+    for name in &final_names {
+        if !seen.insert(name.as_str()) {
+            return Err(format!(
+                "duplicate CSV column name '{name}' after rename_columns"
+            ));
+        }
+    }
+    let mut frame = frame;
+    frame
+        .set_column_names(&final_names)
+        .map_err(|error| error.to_string())?;
+    Ok(frame)
+}
+
 /// Builds the Polars null-marker policy for the reader.
 ///
 /// Polars compares markers with the unquoted field bytes, so a marker that is
@@ -401,6 +501,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
                 .with_quote_char(config.quote)
                 .with_comment_prefix(config.comment.map(CommentPrefix::Single))
                 .with_null_values(csv_null_values(&config))
+                .with_encoding(config.encoding)
         })
         .try_into_reader_with_file_path(Some(PathBuf::from(path)))
         .map_err(|error| error.to_string())?
@@ -408,10 +509,10 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
         .map_err(|error| error.to_string())?;
     // Polars keeps the file column order for a projection. Re-select with the
     // requested names so callers get the order they asked for, like `select`.
-    match &config.columns {
+    let frame = match &config.columns {
         Some(columns) => frame
             .select(columns.iter().map(|name| name.as_str()))
-            .map_err(|error| error.to_string()),
+            .map_err(|error| error.to_string())?,
         None => {
             // Schema overwrites are applied by name. Polars ignores names that
             // are not in the file, so reject typos after the headers are known.
@@ -424,8 +525,12 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
                     }
                 }
             }
-            Ok(frame)
+            frame
         },
+    };
+    match &config.rename_columns {
+        Some(names) => rename_csv_frame(frame, names),
+        None => Ok(frame),
     }
 }
 
@@ -731,6 +836,53 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_null_values(
     finish_frame(result, err)
 }
 
+/// Builds a CSV reader config from the row-window ABI arguments.
+///
+/// `n_rows` uses `-1` as the "read every remaining row" sentinel; other
+/// negative values are errors. The conversion is shared by every reader entry
+/// point that carries the window so they cannot drift.
+unsafe fn csv_read_config_with_window(
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+) -> Result<CsvReadConfig, String> {
+    let skip_rows = usize::try_from(skip_rows)
+        .map_err(|_| "CSV skip_rows is too large for this platform".to_string())?;
+    let n_rows = if n_rows == -1 {
+        None
+    } else if n_rows < 0 {
+        return Err(format!(
+            "CSV n_rows must be -1 to read all rows or a non-negative count, got {n_rows}"
+        ));
+    } else {
+        Some(
+            usize::try_from(n_rows)
+                .map_err(|_| "CSV n_rows is too large for this platform".to_string())?,
+        )
+    };
+    Ok(CsvReadConfig {
+        delimiter: read_delimiter(delimiter)?,
+        has_header: has_header != 0,
+        quote: read_csv_quote(quote)?,
+        comment: read_csv_comment(comment)?,
+        columns: read_csv_columns(columns, column_count)?,
+        dtypes: read_csv_dtypes(dtypes, dtype_count)?,
+        null_values: read_csv_null_values(null_values, null_value_count)?,
+        skip_rows,
+        n_rows,
+        ..CsvReadConfig::default()
+    })
+}
+
 /// Reads a CSV file with every earlier reader option plus a row window.
 ///
 /// `skip_rows` is the number of CSV rows skipped before the header is parsed
@@ -761,31 +913,124 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_row_window(
 ) -> *mut PlFrame {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
         let path = read_path(path)?;
-        let skip_rows = usize::try_from(skip_rows)
-            .map_err(|_| "CSV skip_rows is too large for this platform".to_string())?;
-        let n_rows = if n_rows == -1 {
-            None
-        } else if n_rows < 0 {
-            return Err(format!(
-                "CSV n_rows must be -1 to read all rows or a non-negative count, got {n_rows}"
-            ));
-        } else {
-            Some(
-                usize::try_from(n_rows)
-                    .map_err(|_| "CSV n_rows is too large for this platform".to_string())?,
-            )
-        };
-        let config = CsvReadConfig {
-            delimiter: read_delimiter(delimiter)?,
-            has_header: has_header != 0,
-            quote: read_csv_quote(quote)?,
-            comment: read_csv_comment(comment)?,
-            columns: read_csv_columns(columns, column_count)?,
-            dtypes: read_csv_dtypes(dtypes, dtype_count)?,
-            null_values: read_csv_null_values(null_values, null_value_count)?,
+        let config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
             skip_rows,
             n_rows,
-        };
+        )?;
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with every earlier reader option plus a text encoding.
+///
+/// This is the superset reader entry point. `encoding` is a UTF-8 string:
+/// null or empty keeps strict UTF-8, `utf8` selects it explicitly, and
+/// `utf8-lossy` replaces invalid bytes with the Unicode replacement character.
+/// Other names are errors. See [`pl_dataframe_read_csv_row_window`] for the
+/// shared reader arguments.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_encoded(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    encoding: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
+            skip_rows,
+            n_rows,
+        )?;
+        config.encoding = read_csv_encoding(encoding)?;
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with every earlier reader option, a text encoding, and
+/// positional replacement column names.
+///
+/// `rename_columns` points to `rename_column_count` UTF-8 names and is borrowed
+/// for the duration of the call. The names replace the leading columns of the
+/// frame that would otherwise be returned, so they compose with projection and
+/// apply after dtype overrides and null markers. Supplying more names than the
+/// frame has columns, empty names, and duplicate results are errors; supplying
+/// fewer names renames only that prefix, matching Polars'
+/// `column_names_overwrite` rule.
+///
+/// See [`pl_dataframe_read_csv_encoded`] for the encoding and shared reader
+/// arguments. This entry point is additive; every earlier reader signature and
+/// default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_renamed(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    rename_columns: *const *const c_char,
+    rename_column_count: u64,
+    encoding: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
+            skip_rows,
+            n_rows,
+        )?;
+        config.encoding = read_csv_encoding(encoding)?;
+        config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
         read_csv_frame(&path, config)
     }));
     finish_frame(result, err)
