@@ -496,6 +496,122 @@ test("null_values rejects invalid values", function()
       "expected '" .. case[2] .. "' in: " .. tostring(err))
   end
 end)
+test("skip_rows skips leading rows before the header", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("preamble row\nname,team,score\nana,red,10\nbia,blue,20\n" ..
+    "caio,red,30\n")
+  file:close()
+  local df = polars.read_csv(path, { skip_rows = 1 })
+  eq(df:shape(), 3)
+  eq(table.concat(df:columns(), ","), "name,team,score")
+  local rows = df:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].score, 10)
+  eq(rows[2].team, "blue")
+  eq(rows[3].score, 30)
+  df:close()
+end)
+test("n_rows limits rows and preserves the inferred schema", function()
+  local full = polars.read_csv(fixture)
+  local df = polars.read_csv(fixture, { n_rows = 2 })
+  eq(df:shape(), 2)
+  eq(table.concat(df:columns(), ","), table.concat(full:columns(), ","))
+  local schema = df:schema()
+  for name, dtype in pairs(full:schema()) do
+    eq(schema[name], dtype, "schema." .. name)
+  end
+  local rows = df:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].score, 10)
+  eq(rows[2].name, "bia")
+  eq(rows[2].score, 7)
+  full:close()
+  df:close()
+end)
+test("row window handles empty and past-end ranges", function()
+  local empty = polars.read_csv(fixture, { n_rows = 0 })
+  eq(empty:shape(), 0)
+  eq(table.concat(empty:columns(), ","), "name,team,score,active")
+  eq(empty:schema().score, "i64")
+  empty:close()
+
+  local over = polars.read_csv(fixture, { skip_rows = 0, n_rows = 100 })
+  eq(over:shape(), 5)
+  over:close()
+
+  -- The last row becomes the header, so no data rows remain.
+  local past = polars.read_csv(fixture, { skip_rows = 5 })
+  eq(past:shape(), 0)
+  eq(table.concat(past:columns(), ","), "eva,red,9,false")
+  past:close()
+end)
+test("row window combines with headerless input", function()
+  local df = polars.read_csv(fixture, {
+    header = false,
+    skip_rows = 2,
+    n_rows = 2,
+  })
+  eq(df:shape(), 2)
+  eq(table.concat(df:columns(), ","), "column_1,column_2,column_3,column_4")
+  local rows = df:to_table()
+  eq(rows[1].column_1, "bia")
+  eq(rows[1].column_3, 7)
+  eq(rows[2].column_1, "caio")
+  eq(rows[2].column_3, 12)
+  df:close()
+end)
+test("row window combines with projection, dtype overrides, and null markers", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("metadata\nid,name,note,score\n1,ana,NA,10\n2,bia,missing,20\n" ..
+    "3,caio,,30\n4,duda,N/A,40\n")
+  file:close()
+  local df = polars.read_csv(path, {
+    skip_rows = 1,
+    n_rows = 3,
+    columns = { "score", "note", "name" },
+    dtypes = { score = "f64" },
+    null_values = { "NA", "missing" },
+  })
+  eq(df:shape(), 3)
+  eq(table.concat(df:columns(), ","), "score,note,name")
+  eq(df:schema().score, "f64")
+  local rows = df:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].note, polars.null)
+  eq(rows[1].score, 10)
+  eq(rows[2].name, "bia")
+  eq(rows[2].note, polars.null)
+  eq(rows[2].score, 20)
+  eq(rows[3].name, "caio")
+  eq(rows[3].note, polars.null)
+  df:close()
+end)
+test("row window rejects invalid values", function()
+  local cases = {
+    { { skip_rows = -1 }, "skip_rows" },
+    { { skip_rows = 1.5 }, "skip_rows" },
+    { { skip_rows = "1" }, "skip_rows" },
+    { { skip_rows = true }, "skip_rows" },
+    { { skip_rows = math.huge }, "skip_rows" },
+    { { skip_rows = 2 ^ 53 }, "skip_rows" },
+    { { n_rows = -2 }, "n_rows" },
+    { { n_rows = 0.5 }, "n_rows" },
+    { { n_rows = "2" }, "n_rows" },
+    { { n_rows = false }, "n_rows" },
+    { { n_rows = math.huge }, "n_rows" },
+    { { n_rows = 2 ^ 53 }, "n_rows" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, fixture, case[1])
+    eq(ok, false, "invalid row window options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+    truthy(tostring(err):find("non-negative integer", 1, true),
+      "expected integer guidance in: " .. tostring(err))
+  end
+end)
 test("select returns chosen columns in order", function()
   local df = polars.read_csv(fixture):select("name", "score")
   local rows, cols = df:shape()
