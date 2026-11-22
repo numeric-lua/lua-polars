@@ -48,6 +48,7 @@ struct CsvReadConfig {
     comment: Option<u8>,
     columns: Option<Vec<String>>,
     dtypes: Option<Vec<(String, DataType)>>,
+    null_values: Option<Vec<String>>,
 }
 
 impl Default for CsvReadConfig {
@@ -59,6 +60,7 @@ impl Default for CsvReadConfig {
             comment: None,
             columns: None,
             dtypes: None,
+            null_values: None,
         }
     }
 }
@@ -281,6 +283,62 @@ unsafe fn read_csv_dtypes(
     Ok(Some(dtypes))
 }
 
+/// Reads optional literal CSV null markers from the C ABI.
+///
+/// `values` points to `count` UTF-8 strings. A null pointer or a zero count
+/// keeps Polars' default (empty fields are null). One marker selects the
+/// single-value fast path; several markers are all treated as null. Empty
+/// markers and duplicates are rejected eagerly.
+unsafe fn read_csv_null_values(
+    ptr: *const *const c_char,
+    count: u64,
+) -> Result<Option<Vec<String>>, String> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if ptr.is_null() {
+        return Err("CSV null values are null".to_string());
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| "CSV null value count is too large".to_string())?;
+    let raw = std::slice::from_raw_parts(ptr, count);
+    let mut seen = std::collections::HashSet::new();
+    let mut values = Vec::with_capacity(count);
+    for (index, &value_ptr) in raw.iter().enumerate() {
+        let value = read_utf8(value_ptr, &format!("CSV null value at index {index}"))?;
+        if value.is_empty() {
+            return Err(format!(
+                "CSV null value at index {index} must not be empty"
+            ));
+        }
+        if !seen.insert(value.clone()) {
+            return Err(format!("duplicate CSV null value '{value}'"));
+        }
+        values.push(value);
+    }
+    Ok(Some(values))
+}
+
+/// Builds the Polars null-marker policy for the reader.
+///
+/// Polars compares markers with the unquoted field bytes, so a marker that is
+/// quoted in the file (for example `"NA"`) is supplied without its quotes.
+/// Empty fields are already null without an explicit marker.
+fn csv_null_values(config: &CsvReadConfig) -> Option<NullValues> {
+    let values = config.null_values.as_ref()?;
+    match values.as_slice() {
+        [] => None,
+        [single] => Some(NullValues::AllColumnsSingle(PlSmallStr::from_str(single))),
+        multiple => Some(NullValues::AllColumns(
+            multiple
+                .iter()
+                .map(|value| PlSmallStr::from_str(value))
+                .collect(),
+        )),
+    }
+}
+
 /// Builds the Polars schema overwrite for the requested dtype overrides.
 ///
 /// A projection limits which columns are read, so an override for a column
@@ -336,6 +394,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
                 .with_separator(config.delimiter)
                 .with_quote_char(config.quote)
                 .with_comment_prefix(config.comment.map(CommentPrefix::Single))
+                .with_null_values(csv_null_values(&config))
         })
         .try_into_reader_with_file_path(Some(PathBuf::from(path)))
         .map_err(|error| error.to_string())?
@@ -524,6 +583,7 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_ex(
             comment: read_csv_comment(comment)?,
             columns: None,
             dtypes: None,
+            null_values: None,
         };
         read_csv_frame(&path, config)
     }));
@@ -561,6 +621,7 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_projected(
             comment: read_csv_comment(comment)?,
             columns: read_csv_columns(columns, column_count)?,
             dtypes: None,
+            null_values: None,
         };
         read_csv_frame(&path, config)
     }));
@@ -582,6 +643,9 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_projected(
 /// `f32`/`f64`, and `str`/`string`/`utf8`; these are the dtypes the pinned
 /// CSV reader can build directly. Matching is case-insensitive. This entry
 /// point is additive.
+///
+/// [`pl_dataframe_read_csv_null_values`] adds literal null markers to this
+/// signature.
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_csv_typed(
     path: *const c_char,
@@ -604,6 +668,53 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_typed(
             comment: read_csv_comment(comment)?,
             columns: read_csv_columns(columns, column_count)?,
             dtypes: read_csv_dtypes(dtypes, dtype_count)?,
+            null_values: None,
+        };
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with delimiter, header, quote, comment, projection, dtype
+/// override, and literal null-marker controls.
+///
+/// This is the superset reader entry point. `columns`, `column_count`,
+/// `dtypes`, and `dtype_count` have the same meaning as in
+/// [`pl_dataframe_read_csv_typed`]; see that function for the supported dtype
+/// names. `null_values` points to `null_value_count` UTF-8 strings and is
+/// borrowed for the duration of the call. A null pointer or a zero count keeps
+/// the default where only empty fields are null; one marker uses Polars'
+/// single-value policy and several markers are all interpreted as null.
+///
+/// Markers are compared with the unquoted field bytes, so a marker that is
+/// quoted in the file (for example `"NA"`) is supplied without its quotes.
+/// Empty and duplicate markers are errors. This entry point is additive; the
+/// earlier reader signatures and defaults are unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_null_values(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let config = CsvReadConfig {
+            delimiter: read_delimiter(delimiter)?,
+            has_header: has_header != 0,
+            quote: read_csv_quote(quote)?,
+            comment: read_csv_comment(comment)?,
+            columns: read_csv_columns(columns, column_count)?,
+            dtypes: read_csv_dtypes(dtypes, dtype_count)?,
+            null_values: read_csv_null_values(null_values, null_value_count)?,
         };
         read_csv_frame(&path, config)
     }));

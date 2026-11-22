@@ -27,6 +27,12 @@ PlFrame *pl_dataframe_read_csv_typed(
     const char *quote, const char *comment,
     const char *const *columns, uint64_t column_count,
     const char *const *dtypes, uint64_t dtype_count, char **err);
+PlFrame *pl_dataframe_read_csv_null_values(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -610,6 +616,7 @@ local CSV_OPTION_KEYS = {
   comment = true,
   columns = true,
   dtypes = true,
+  null_values = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -704,9 +711,58 @@ local function csv_dtypes(value)
   return flat, #entries
 end
 
+-- Accepts one literal marker shared by every column or a non-empty list of
+-- markers. Markers are compared with unquoted field bytes, so a quoted field
+-- like "NA" uses the marker "NA". Table shape is strict: a map with column
+-- keys is rejected instead of being silently treated as an empty list.
+local function csv_null_values(value)
+  if value == nil then
+    return nil, 0
+  end
+  if type(value) == "string" then
+    if value == "" then
+      error("read_csv null_values must not be empty", 3)
+    end
+    return { value }, 1
+  end
+  if type(value) ~= "table" then
+    error("read_csv null_values must be a non-empty string or a list of strings", 3)
+  end
+  local keys = {}
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      error("read_csv null_values must be a non-empty string or a list of strings", 3)
+    end
+    keys[#keys + 1] = key
+  end
+  if #keys == 0 then
+    error("read_csv null_values must not be empty", 3)
+  end
+  table.sort(keys)
+  for index, key in ipairs(keys) do
+    if key ~= index then
+      error("read_csv null_values must be a contiguous list of strings", 3)
+    end
+  end
+  local seen = {}
+  local result = {}
+  for index = 1, #keys do
+    local marker = value[index]
+    if type(marker) ~= "string" or marker == "" then
+      error("read_csv null_values entries must be non-empty strings", 3)
+    end
+    if seen[marker] then
+      error("duplicate read_csv null value '" .. marker .. "'", 3)
+    end
+    seen[marker] = true
+    result[index] = marker
+  end
+  return result, #result
+end
+
 local function csv_options(options)
   if options == nil then
-    return ",", true, '"', "", nil, nil, 0
+    return ",", true, '"', "", nil, nil, 0, nil, 0
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -730,15 +786,17 @@ local function csv_options(options)
   local comment = csv_byte_option(options, "comment", "")
   local columns = csv_columns(options.columns)
   local dtypes, dtype_count = csv_dtypes(options.dtypes)
-  return delimiter, header, quote, comment, columns, dtypes, dtype_count
+  local null_values, null_value_count = csv_null_values(options.null_values)
+  return delimiter, header, quote, comment, columns, dtypes, dtype_count,
+    null_values, null_value_count
 end
 
 function polars.read_csv(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_csv path must be a non-empty string", 2)
   end
-  local delimiter, header, quote, comment, columns, dtypes, dtype_count =
-    csv_options(options)
+  local delimiter, header, quote, comment, columns, dtypes, dtype_count,
+    null_values, null_value_count = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -747,12 +805,23 @@ function polars.read_csv(path, options)
       names[index - 1] = name
     end
   end
-  local pointer
+  local dtype_pairs
   if dtypes ~= nil then
-    local dtype_pairs = ffi.new("const char *[?]", #dtypes)
+    dtype_pairs = ffi.new("const char *[?]", #dtypes)
     for index, value in ipairs(dtypes) do
       dtype_pairs[index - 1] = value
     end
+  end
+  local pointer
+  if null_values ~= nil then
+    local markers = ffi.new("const char *[?]", #null_values)
+    for index, value in ipairs(null_values) do
+      markers[index - 1] = value
+    end
+    pointer = lib.pl_dataframe_read_csv_null_values(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, err)
+  elseif dtypes ~= nil then
     pointer = lib.pl_dataframe_read_csv_typed(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, err)
