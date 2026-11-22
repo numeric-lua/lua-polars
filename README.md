@@ -26,9 +26,9 @@ end
 
 ## Status
 
-`0.16.0` is an eager-first MVP:
+`0.17.0` is an eager-first MVP:
 
-- CSV and Parquet readers and writers
+- CSV, Parquet, and JSON readers and writers
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
   files, a one-byte `quote` character (or `false` to disable quote parsing),
   a one-byte `comment` prefix (or `false` to disable comment skipping), a
@@ -37,22 +37,27 @@ end
   inferred dtypes by column name (`bool`, `i32`, `i64`, `u32`, `u64`, `f32`,
   `f64`, `str`), `null_values` as a literal marker string or list of markers
   applied to every column, or a table mapping column names to one marker each,
-  a `skip_rows`/`n_rows` window over the rows before and after the header, and
+  a `skip_rows`/`n_rows` window over the rows before and after the header,
+  `try_parse_dates = true` for ISO date/datetime inference, and
   `encoding = "utf8-lossy"` for invalid UTF-8 input
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
-  header row, a literal `null_value` placeholder for null fields, and a
-  `line_terminator` of `"\n"` or `"\r\n"`
+  header row, a literal `null_value` placeholder for null fields, a
+  `line_terminator` of `"\n"` or `"\r\n"`, and a `quote_style` of
+  `"necessary"`, `"always"`, `"non_numeric"`, or `"never"`
 - Parquet reader options: a `columns` name/list projection and a
   `skip_rows`/`n_rows` window that keeps the file schema for empty results
 - Parquet writer options: a `compression` codec (`zstd`, `snappy`, `gzip`,
   `brotli`, `lz4`, `uncompressed`), `statistics = false` to skip column
   statistics, and positive `row_group_size`/`data_page_size` chunk controls
-- schema, shape, head, ordered columns
+- JSON reader options: `format = "array"` (default; alias `"json"`) or
+  `"lines"`/`"ndjson"` and a `columns` name/list projection; JSON writers
+  support the same array/lines formats
+- schema, shape, head/tail/slice, ordered columns, and `with_row_index`
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, group-by, drop, rename, and with-columns
   that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
-- row-oriented `to_table()` and raw `to_json()`
+- row-oriented `to_table()` and raw `to_json()`, plus `read_json`/`write_json`
 - `drop_nulls()`/`fill_null()`, `unique()`/`null_count()`, and row iteration
   helpers
 - explicit `:close()` plus Lua GC finalization
@@ -94,14 +99,15 @@ checks. It reuses `target/release/libpolars_lua.so` when it is newer than the
 Rust inputs and otherwise runs Cargo incrementally, so repeating an install
 check does not restart the Polars build.
 
-The test suite is dependency-free and covers CSV/Parquet parsing and writing,
-custom CSV delimiters, quote characters, comment prefixes, headerless files,
-read-time column projection, positional column renaming, dtype overrides,
-literal and per-column null markers, UTF-8 lossy decoding, and
-skip-rows/row-limit windows,
+The test suite is dependency-free and covers CSV/Parquet/JSON parsing and
+writing, custom CSV delimiters, quote characters, comment prefixes, headerless
+files, read-time column projection, positional column renaming, dtype overrides,
+literal and per-column null markers, UTF-8 lossy decoding,
+skip-rows/row-limit windows, CSV date inference and writer quote styles,
 writer delimiter/header/null/line-terminator options,
 Parquet column projections, row windows, compression codecs, statistics and
-chunk-size writer options, schema, projection,
+chunk-size writer options, JSON array/JSON Lines round-trips, schema, head,
+tail, slice, row indexing, projection,
 filtering, sorting, grouping, all eager join types, column operations, SQL,
 JSON conversion, and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
@@ -124,17 +130,17 @@ Lua loader also searches the directories on `package.cpath`, so no
 `POLARS_LUA_LIB` is needed.
 
 ```sh
-luarocks make lua-polars-0.16.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.17.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 For a clean checkout the first command compiles Polars; set
 `CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec and
-`scripts/build.sh` default to one job). The source URL points at the `v0.16.0`
+`scripts/build.sh` default to one job). The source URL points at the `v0.17.0`
 tag, which is created as part of the release: use `luarocks make` from a
 checkout before the tag exists, and
-`luarocks build lua-polars-0.16.0-1.rockspec` afterwards. Both use the same
+`luarocks build lua-polars-0.17.0-1.rockspec` afterwards. Both use the same
 build and install commands.
 
 ## Install into a prefix
@@ -168,6 +174,7 @@ polars.read_csv(path, {
   dtypes = { score = "f64" },
   null_values = { "NA", "missing" },
   encoding = "utf8-lossy",
+  try_parse_dates = true,
   skip_rows = 1,
   n_rows = 100,
 })
@@ -180,11 +187,19 @@ polars.read_parquet(path, {
   skip_rows = 10,
   n_rows = 100,
 })
+polars.read_json(path)
+polars.read_json(path, {
+  format = "lines",
+  columns = { "time", "event" },
+})
 
 df:shape()                -- rows, cols
 df:schema()               -- { column = "i64", ... }
 df:columns()              -- ordered column names
 df:head(n)
+df:tail(n)
+df:slice(offset, length)
+df:with_row_index("row_id", 100)
 df:sql(query)
 df:select("a", "b")
 df:filter('"a" > 3')
@@ -201,6 +216,7 @@ df:write_csv("out.tsv", {
   null_value = "NA",
 })
 df:write_csv("out-crlf.csv", { line_terminator = "\r\n" })
+df:write_csv("quoted.csv", { quote_style = "always" })
 df:write_parquet("out.parquet")
 df:write_parquet("out.parquet", {
   compression = "snappy",
@@ -208,6 +224,8 @@ df:write_parquet("out.parquet", {
   row_group_size = 1000,
   data_page_size = 65536,
 })
+df:write_json("out.json")
+df:write_json("out.jsonl", { format = "lines" })
 df:to_table()
 df:to_json()
 df:close()

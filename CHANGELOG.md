@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.17.0
+
+- five DataFrame/IO additions:
+  - `df:tail(n)` returns the last `n` rows with the head defaults, and
+    `df:slice(offset, length)` supports negative offsets from the end plus
+    empty and past-end windows;
+  - `df:with_row_index([name, offset])` prepends a zero-based row-index column,
+    defaults to `index`/`0`, and rejects empty, colliding, or invalid names and
+    offsets;
+  - `polars.read_csv(..., { try_parse_dates = true })` lets Polars infer ISO
+    date and datetime columns instead of strings, composing with projection,
+    dtype overrides, null markers, renames, row windows, and encoding;
+  - `df:write_csv(..., { quote_style = ... })` accepts `necessary`, `always`,
+    `non_numeric`/`non-numeric`, and `never`, case-insensitively;
+  - `polars.read_json(path, options)` and `df:write_json(path, options)` read
+    and write JSON arrays or JSON Lines with `format = "array"`/`"lines"`
+    aliases and an optional read-time `columns` projection;
+- the additive C ABI entry points are `pl_dataframe_tail`,
+  `pl_dataframe_slice`, `pl_dataframe_with_row_index`,
+  `pl_dataframe_read_csv_parsed`, `pl_dataframe_write_csv_configured`,
+  `pl_dataframe_read_json`, and `pl_dataframe_write_json`; every earlier
+  signature and default is unchanged;
+- the date/datetime Polars features are enabled so `try_parse_dates` produces
+  real `date`/`datetime` dtypes; `QuoteStyle::Always` writes an empty null as
+  `""`, which reads back as an empty string unless a `null_value` is used;
+- validation covers non-integer and above-`2^53 - 1` counts/offsets, row-index
+  collisions, non-boolean date inference, unknown quote styles and JSON
+  formats, malformed projections, missing/malformed files, closed frames, and
+  filesystem failures;
+- tests cover tail/slice windows, row-index offsets and collisions, CSV date
+  inference and its option combinations, every quote style and combined writer
+  options, JSON array/JSON Lines reads and writes, projections, malformed
+  options/files, and the installed-tree path through the prefix smoke test;
+- `./scripts/test.sh` passed 125 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validated the installed-prefix and LuaRocks layouts
+  for 0.17.0-1;
+- the 0.17.0 tag is created for this release.
+
 ## 0.16.0
 
 - `polars.read_parquet(path, options)` accepts `columns` as a single name or a
