@@ -28,6 +28,14 @@ before. Type inference is Polars' default.
   return, and NUL bytes are rejected.
 - `header`: a boolean, default `true`. With `header = false` the first row is
   data and Polars names the columns `column_1`, `column_2`, and so on.
+- `skip_rows`: a non-negative integer, default `0`. Rows are skipped before the
+  header is parsed, so leading metadata lines can be discarded; Polars respects
+  CSV quoting and comments while skipping. The window counts CSV rows, not Lua
+  indices, and must be at most `2^53 - 1`.
+- `n_rows`: a non-negative integer, default unlimited. Limits the number of
+  data rows read after the header. `n_rows = 0` reads no data rows while
+  keeping the header-derived schema; a limit larger than the file reads the
+  remaining rows. Like `skip_rows`, it must be at most `2^53 - 1`.
 - `quote`: a one-byte string used to quote fields, default `"`. Set it to
   `false` or `""` to disable quote parsing. NUL, newline, and carriage-return
   bytes are rejected.
@@ -74,13 +82,17 @@ local typed = polars.read_csv("data.csv", {
 local null_markers = polars.read_csv("data.csv", {
   null_values = { "NA", "missing" },
 })
+local window = polars.read_csv("export.csv", {
+  skip_rows = 2,
+  n_rows = 100,
+})
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
 collisions, invalid projection names, unsupported or missing dtype overrides,
-invalid null-value markers, a missing or unreadable path, and files that cannot
-be parsed.
+invalid null-value markers, negative or fractional row-window counts, a missing
+or unreadable path, and files that cannot be parsed.
 
 ### `polars.read_parquet(path) -> DataFrame`
 
@@ -304,6 +316,13 @@ PlFrame *pl_dataframe_read_csv_null_values(
     const char *const *columns, uint64_t column_count,
     const char *const *dtypes, uint64_t dtype_count,
     const char *const *null_values, uint64_t null_value_count, char **err);
+PlFrame *pl_dataframe_read_csv_row_window(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    uint64_t skip_rows, int64_t n_rows, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -367,6 +386,15 @@ single-value policy and several markers are all interpreted as null. Markers
 are compared with unquoted field bytes, so a quoted `"NA"` field uses the
 marker `NA`. Empty and duplicate markers are errors, as is a null array with a
 non-zero count.
+
+`pl_dataframe_read_csv_row_window` is additive and combines every earlier
+reader option with a row window. `skip_rows` is the number of CSV rows skipped
+before the header is parsed. `n_rows` limits the data rows read after the
+header: `-1` reads every remaining row and any other negative value is an
+error. `skip_rows = 0` with `n_rows = -1` matches the earlier defaults. Both
+counts are `uint64_t`/`int64_t` at the ABI; the Lua wrapper restricts them to
+non-negative safe integers and rejects fractional or non-numeric values before
+the call.
 
 `pl_dataframe_write_csv_options` is additive; `pl_dataframe_write_csv` keeps
 its signature and comma/header/empty-null defaults. A null `delimiter` means
@@ -433,6 +461,7 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV reader quote and comment options.
 - [x] CSV reader column projection and dtype overrides.
 - [x] CSV reader null-value markers.
+- [x] CSV reader row windows (`skip_rows`, `n_rows`).
 - [x] CSV writer delimiter, header, and null-value options.
 - [x] LuaRocks source-rock packaging.
 - [ ] LazyFrame/expressions.

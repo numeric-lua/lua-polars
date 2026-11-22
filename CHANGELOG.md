@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- `polars.read_csv(path, options)` accepts `skip_rows` and `n_rows`, a
+  non-negative row window: `skip_rows` drops CSV rows before the header is
+  parsed and `n_rows` limits the data rows read after it; `n_rows = 0` keeps the
+  header-derived schema and an absent `n_rows` reads the remaining rows;
+- the additive `pl_dataframe_read_csv_row_window` C ABI entry point combines
+  the full reader configuration (delimiter, header, quote, comment, projection,
+  dtype overrides, and null markers) with `uint64_t skip_rows` and
+  `int64_t n_rows`, where `-1` means all remaining rows; earlier reader entry
+  points keep their signatures and defaults;
+- negative, fractional, non-numeric, and above-`2^53 - 1` row-window values are
+  rejected in Lua before the bridge is called, and the bridge rejects other
+  negative `n_rows` sentinels;
+- tests cover leading preamble rows, row limits, empty and past-end windows,
+  headerless input, and combinations with projection, dtype overrides, and
+  null markers;
+- 85 tests.
+
 ## 0.12.0
 
 - `polars.read_csv(path, options)` accepts `null_values`, a literal marker

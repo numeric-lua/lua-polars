@@ -34,8 +34,9 @@ end
   a one-byte `comment` prefix (or `false` to disable comment skipping), a
   `columns` name/list projection returned in the requested order, a
   `dtypes` table that overrides inferred dtypes by column name (`bool`, `i32`,
-  `i64`, `u32`, `u64`, `f32`, `f64`, `str`), and `null_values` as a literal
-  marker string or list of markers applied to every column
+  `i64`, `u32`, `u64`, `f32`, `f64`, `str`), `null_values` as a literal
+  marker string or list of markers applied to every column, and a
+  `skip_rows`/`n_rows` window over the rows before and after the header
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, and a literal `null_value` placeholder for null fields
 - schema, shape, head, ordered columns
@@ -87,10 +88,10 @@ check does not restart the Polars build.
 
 The test suite is dependency-free and covers CSV/Parquet parsing and writing,
 custom CSV delimiters, quote characters, comment prefixes, headerless files,
-read-time column projection, dtype overrides, and literal null markers, writer
-delimiter/header/null options, schema, projection, filtering, sorting,
-grouping, all eager join types, column operations, SQL, JSON conversion, and
-error paths. The smoke test installs the module and bridge into a prefix and
+read-time column projection, dtype overrides, literal null markers, and
+skip-rows/row-limit windows, writer delimiter/header/null options, schema,
+projection, filtering, sorting, grouping, all eager join types, column
+operations, SQL, JSON conversion, and error paths. The smoke test installs the module and bridge into a prefix and
 verifies that `require("polars")` finds the bridge without `POLARS_LUA_LIB`.
 The rockspec check validates the release version references, installs the same
 checkout through LuaRocks into the ignored `.luarocks-tree/` directory, and
@@ -152,6 +153,8 @@ polars.read_csv(path, {
   columns = { "name", "score" },
   dtypes = { score = "f64" },
   null_values = { "NA", "missing" },
+  skip_rows = 1,
+  n_rows = 100,
 })
 polars.read_parquet(path)
 
