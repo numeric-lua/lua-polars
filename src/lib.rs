@@ -49,6 +49,7 @@ struct CsvReadConfig {
     columns: Option<Vec<String>>,
     dtypes: Option<Vec<(String, DataType)>>,
     null_values: Option<Vec<String>>,
+    named_null_values: Option<Vec<(String, String)>>,
     rename_columns: Option<Vec<String>>,
     skip_rows: usize,
     n_rows: Option<usize>,
@@ -65,6 +66,7 @@ impl Default for CsvReadConfig {
             columns: None,
             dtypes: None,
             null_values: None,
+            named_null_values: None,
             rename_columns: None,
             skip_rows: 0,
             n_rows: None,
@@ -350,6 +352,54 @@ unsafe fn read_csv_null_values(
     Ok(Some(values))
 }
 
+/// Reads optional per-column literal null markers from the C ABI.
+///
+/// `columns` and `values` are parallel arrays of `count` UTF-8 strings. A null
+/// pointer or a zero count disables the policy and keeps Polars' default where
+/// empty fields are null. Each named column gets exactly one marker; emptying
+/// a marker or naming a column twice is rejected eagerly. Markers for columns
+/// outside a projection are rejected by the reader config so a typo cannot be
+/// silently ignored.
+unsafe fn read_csv_named_null_values(
+    columns: *const *const c_char,
+    values: *const *const c_char,
+    count: u64,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if columns.is_null() || values.is_null() {
+        return Err("CSV named null values are null".to_string());
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| "CSV named null value count is too large".to_string())?;
+    let column_ptrs = std::slice::from_raw_parts(columns, count);
+    let value_ptrs = std::slice::from_raw_parts(values, count);
+    let mut seen = std::collections::HashSet::new();
+    let mut pairs = Vec::with_capacity(count);
+    for index in 0..count {
+        let column = read_utf8(
+            column_ptrs[index],
+            &format!("CSV null value column at index {index}"),
+        )?;
+        if column.is_empty() {
+            return Err(format!(
+                "CSV null value column at index {index} must not be empty"
+            ));
+        }
+        if !seen.insert(column.clone()) {
+            return Err(format!("duplicate CSV null value column '{column}'"));
+        }
+        let value = read_utf8(value_ptrs[index], &format!("CSV null value for '{column}'"))?;
+        if value.is_empty() {
+            return Err(format!("CSV null value for '{column}' must not be empty"));
+        }
+        pairs.push((column, value));
+    }
+    Ok(Some(pairs))
+}
+
 /// Reads optional positional replacement names from the C ABI.
 ///
 /// `ptr` points to `count` UTF-8 names that replace the leading column names
@@ -450,10 +500,26 @@ fn rename_csv_frame(frame: DataFrame, names: &[String]) -> Result<DataFrame, Str
 ///
 /// Polars compares markers with the unquoted field bytes, so a marker that is
 /// quoted in the file (for example `"NA"`) is supplied without its quotes.
-/// Empty fields are already null without an explicit marker.
-fn csv_null_values(config: &CsvReadConfig) -> Option<NullValues> {
-    let values = config.null_values.as_ref()?;
-    match values.as_slice() {
+/// Empty fields are already null without an explicit marker. Per-column
+/// markers take precedence over the shared list; the Lua wrapper never sets
+/// both, and the ABI validates each policy separately.
+fn csv_null_values(config: &CsvReadConfig) -> Result<Option<NullValues>, String> {
+    if let Some(named) = config.named_null_values.as_ref() {
+        if !named.is_empty() {
+            return Ok(Some(NullValues::Named(
+                named
+                    .iter()
+                    .map(|(column, value)| {
+                        (PlSmallStr::from_str(column), PlSmallStr::from_str(value))
+                    })
+                    .collect(),
+            )));
+        }
+    }
+    let Some(values) = config.null_values.as_ref() else {
+        return Ok(None);
+    };
+    Ok(match values.as_slice() {
         [] => None,
         [single] => Some(NullValues::AllColumnsSingle(PlSmallStr::from_str(single))),
         multiple => Some(NullValues::AllColumns(
@@ -462,7 +528,7 @@ fn csv_null_values(config: &CsvReadConfig) -> Option<NullValues> {
                 .map(|value| PlSmallStr::from_str(value))
                 .collect(),
         )),
-    }
+    })
 }
 
 /// Builds the Polars schema overwrite for the requested dtype overrides.
@@ -499,12 +565,25 @@ fn validate_csv_config(config: &CsvReadConfig) -> Result<(), String> {
     if config.quote.is_some() && config.quote == config.comment {
         return Err("CSV quote character and comment prefix must differ".to_string());
     }
+    if config.named_null_values.is_some() && config.null_values.is_some() {
+        return Err("CSV null_values cannot combine shared and per-column markers".to_string());
+    }
+    if let (Some(named), Some(columns)) = (&config.named_null_values, &config.columns) {
+        for (column, _) in named {
+            if !columns.iter().any(|name| name == column) {
+                return Err(format!(
+                    "CSV null value column '{column}' is not in the projection"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
 fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String> {
     validate_csv_config(&config)?;
     let schema_overwrite = csv_schema_overwrite(&config)?;
+    let null_values = csv_null_values(&config)?;
     let columns: Option<Arc<[PlSmallStr]>> = config.columns.as_ref().map(|columns| {
         columns
             .iter()
@@ -522,7 +601,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
                 .with_separator(config.delimiter)
                 .with_quote_char(config.quote)
                 .with_comment_prefix(config.comment.map(CommentPrefix::Single))
-                .with_null_values(csv_null_values(&config))
+                .with_null_values(null_values.clone())
                 .with_encoding(config.encoding)
         })
         .try_into_reader_with_file_path(Some(PathBuf::from(path)))
@@ -1053,6 +1132,67 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_renamed(
         )?;
         config.encoding = read_csv_encoding(encoding)?;
         config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with every earlier reader option, a text encoding, a
+/// positional rename list, and per-column literal null markers.
+///
+/// This is the superset reader entry point for per-column markers.
+/// `null_columns` and `null_values` are parallel arrays of `null_value_count`
+/// UTF-8 strings: each column gets exactly one marker, and columns without an
+/// entry keep the default where only empty fields are null. Markers are
+/// compared with the unquoted field bytes, so a marker quoted in the file is
+/// supplied without its quotes. Empty column names or markers, duplicate
+/// columns, and markers outside the projection are errors.
+///
+/// Markers are applied before `rename_columns`, so they name the file's
+/// original columns, like `dtypes`. See [`pl_dataframe_read_csv_renamed`] for
+/// the shared reader and rename arguments. This entry point is additive;
+/// every earlier reader signature and default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_named_nulls(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_columns: *const *const c_char,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    rename_columns: *const *const c_char,
+    rename_column_count: u64,
+    encoding: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            ptr::null(),
+            0,
+            skip_rows,
+            n_rows,
+        )?;
+        config.encoding = read_csv_encoding(encoding)?;
+        config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
+        config.named_null_values =
+            read_csv_named_null_values(null_columns, null_values, null_value_count)?;
         read_csv_frame(&path, config)
     }));
     finish_frame(result, err)

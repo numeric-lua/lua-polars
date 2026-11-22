@@ -56,6 +56,16 @@ PlFrame *pl_dataframe_read_csv_renamed(
     uint64_t skip_rows, int64_t n_rows,
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, char **err);
+PlFrame *pl_dataframe_read_csv_named_nulls(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_columns, const char *const *null_values,
+    uint64_t null_value_count,
+    uint64_t skip_rows, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -754,42 +764,72 @@ local function csv_dtypes(value)
   return flat, #entries
 end
 
--- Accepts one literal marker shared by every column or a non-empty list of
--- markers. Markers are compared with unquoted field bytes, so a quoted field
--- like "NA" uses the marker "NA". Table shape is strict: a map with column
--- keys is rejected instead of being silently treated as an empty list.
+-- Accepts one literal marker shared by every column, a non-empty list of
+-- markers for every column, or a table mapping column names to one marker
+-- each. Named markers apply only to their column; empty fields remain null in
+-- every column. Table shape is strict: a map is never silently treated as
+-- an empty list, and list indices cannot be mixed with column keys.
 local function csv_null_values(value)
   if value == nil then
-    return nil, 0
+    return nil, 0, nil, nil
   end
   if type(value) == "string" then
     if value == "" then
       error("read_csv null_values must not be empty", 3)
     end
-    return { value }, 1
+    return { value }, 1, nil, nil
   end
   if type(value) ~= "table" then
-    error("read_csv null_values must be a non-empty string or a list of strings", 3)
+    error("read_csv null_values must be a non-empty string or a list, " ..
+      "or a table of column = marker pairs", 3)
   end
-  local keys = {}
+  local array_keys = {}
+  local named_keys = {}
   for key in pairs(value) do
-    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
-      error("read_csv null_values must be a non-empty string or a list of strings", 3)
+    if type(key) == "number" then
+      if key < 1 or key % 1 ~= 0 then
+        error("read_csv null_values list indices must be positive integers", 3)
+      end
+      array_keys[#array_keys + 1] = key
+    elseif type(key) == "string" then
+      named_keys[#named_keys + 1] = key
+    else
+      error("read_csv null_values keys must be column names or list indices", 3)
     end
-    keys[#keys + 1] = key
   end
-  if #keys == 0 then
+  if #array_keys > 0 and #named_keys > 0 then
+    error("read_csv null_values must be either a list of markers or a " ..
+      "table of column = marker pairs", 3)
+  end
+  if #named_keys > 0 then
+    table.sort(named_keys)
+    local columns = {}
+    local markers = {}
+    for index, column in ipairs(named_keys) do
+      if column == "" then
+        error("read_csv null_values column names must be non-empty strings", 3)
+      end
+      local marker = value[column]
+      if type(marker) ~= "string" or marker == "" then
+        error("read_csv null_values markers must be non-empty strings", 3)
+      end
+      columns[index] = column
+      markers[index] = marker
+    end
+    return nil, 0, columns, markers
+  end
+  if #array_keys == 0 then
     error("read_csv null_values must not be empty", 3)
   end
-  table.sort(keys)
-  for index, key in ipairs(keys) do
+  table.sort(array_keys)
+  for index, key in ipairs(array_keys) do
     if key ~= index then
       error("read_csv null_values must be a contiguous list of strings", 3)
     end
   end
   local seen = {}
   local result = {}
-  for index = 1, #keys do
+  for index = 1, #array_keys do
     local marker = value[index]
     if type(marker) ~= "string" or marker == "" then
       error("read_csv null_values entries must be non-empty strings", 3)
@@ -800,7 +840,7 @@ local function csv_null_values(value)
     seen[marker] = true
     result[index] = marker
   end
-  return result, #result
+  return result, #result, nil, nil
 end
 
 -- Replacement names are positional and replace the leading columns of the
@@ -896,7 +936,8 @@ end
 
 local function csv_options(options)
   if options == nil then
-    return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil
+    return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil,
+      nil, nil
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -921,12 +962,13 @@ local function csv_options(options)
   local columns = csv_columns(options.columns)
   local rename_columns = csv_rename_columns(options.rename_columns)
   local dtypes, dtype_count = csv_dtypes(options.dtypes)
-  local null_values, null_value_count = csv_null_values(options.null_values)
+  local null_values, null_value_count, named_null_columns, named_null_values =
+    csv_null_values(options.null_values)
   local skip_rows, n_rows, window_requested = csv_row_window(options)
   local encoding = csv_encoding(options.encoding)
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
-    rename_columns, encoding
+    rename_columns, encoding, named_null_columns, named_null_values
 end
 
 function polars.read_csv(path, options)
@@ -935,7 +977,8 @@ function polars.read_csv(path, options)
   end
   local delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
-    rename_columns, encoding = csv_options(options)
+    rename_columns, encoding, named_null_columns, named_null_values =
+    csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -965,8 +1008,24 @@ function polars.read_csv(path, options)
       renames[index - 1] = value
     end
   end
+  local named_columns
+  local named_markers
+  if named_null_columns ~= nil then
+    named_columns = ffi.new("const char *[?]", #named_null_columns)
+    named_markers = ffi.new("const char *[?]", #named_null_values)
+    for index, value in ipairs(named_null_columns) do
+      named_columns[index - 1] = value
+      named_markers[index - 1] = named_null_values[index]
+    end
+  end
   local pointer
-  if rename_columns ~= nil then
+  if named_null_columns ~= nil then
+    pointer = lib.pl_dataframe_read_csv_named_nulls(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, named_columns, named_markers,
+      #named_null_columns, skip_rows, n_rows, renames,
+      rename_columns and #rename_columns or 0, encoding, err)
+  elseif rename_columns ~= nil then
     pointer = lib.pl_dataframe_read_csv_renamed(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, markers, null_value_count, skip_rows, n_rows,
