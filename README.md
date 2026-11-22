@@ -33,12 +33,14 @@ end
   files, a one-byte `quote` character (or `false` to disable quote parsing),
   a one-byte `comment` prefix (or `false` to disable comment skipping), a
   `columns` name/list projection returned in the requested order, a
-  `dtypes` table that overrides inferred dtypes by column name (`bool`, `i32`,
-  `i64`, `u32`, `u64`, `f32`, `f64`, `str`), `null_values` as a literal
-  marker string or list of markers applied to every column, and a
-  `skip_rows`/`n_rows` window over the rows before and after the header
+  `rename_columns` positional name list, a `dtypes` table that overrides
+  inferred dtypes by column name (`bool`, `i32`, `i64`, `u32`, `u64`, `f32`,
+  `f64`, `str`), `null_values` as a literal marker string or list of markers
+  applied to every column, a `skip_rows`/`n_rows` window over the rows before
+  and after the header, and `encoding = "utf8-lossy"` for invalid UTF-8 input
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
-  header row, and a literal `null_value` placeholder for null fields
+  header row, a literal `null_value` placeholder for null fields, and a
+  `line_terminator` of `"\n"` or `"\r\n"`
 - schema, shape, head, ordered columns
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, group-by, drop, rename, and with-columns
@@ -88,11 +90,13 @@ check does not restart the Polars build.
 
 The test suite is dependency-free and covers CSV/Parquet parsing and writing,
 custom CSV delimiters, quote characters, comment prefixes, headerless files,
-read-time column projection, dtype overrides, literal null markers, and
-skip-rows/row-limit windows, writer delimiter/header/null options, schema,
-projection, filtering, sorting, grouping, all eager join types, column
-operations, SQL, JSON conversion, and error paths. The smoke test installs the module and bridge into a prefix and
-verifies that `require("polars")` finds the bridge without `POLARS_LUA_LIB`.
+read-time column projection, positional column renaming, dtype overrides,
+literal null markers, UTF-8 lossy decoding, and skip-rows/row-limit windows,
+writer delimiter/header/null/line-terminator options, schema, projection,
+filtering, sorting, grouping, all eager join types, column operations, SQL,
+JSON conversion, and error paths. The smoke test installs the module and bridge
+into a prefix and verifies that `require("polars")` finds the bridge without
+`POLARS_LUA_LIB`.
 The rockspec check validates the release version references, installs the same
 checkout through LuaRocks into the ignored `.luarocks-tree/` directory, and
 requires it from there. A content stamp skips `luarocks make` while the rockspec, Lua
@@ -151,8 +155,10 @@ polars.read_csv(path, {
   quote = "'",
   comment = "#",
   columns = { "name", "score" },
+  rename_columns = { "person", "points" },
   dtypes = { score = "f64" },
   null_values = { "NA", "missing" },
+  encoding = "utf8-lossy",
   skip_rows = 1,
   n_rows = 100,
 })
@@ -177,6 +183,7 @@ df:write_csv("out.tsv", {
   header = false,
   null_value = "NA",
 })
+df:write_csv("out-crlf.csv", { line_terminator = "\r\n" })
 df:write_parquet("out.parquet")
 df:to_table()
 df:to_json()

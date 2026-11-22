@@ -19,8 +19,10 @@ Returns the bridge version (`"0.13.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
-Reads a UTF-8 CSV file. With no options it expects a header row and commas, as
-before. Type inference is Polars' default.
+Reads a CSV file. UTF-8 is the default text encoding; invalid bytes fail the
+read unless `encoding = "utf8-lossy"` asks Polars to substitute U+FFFD. With no
+options it expects a header row and commas, as before. Type inference is
+Polars' default.
 
 `options` is an optional table:
 
@@ -45,6 +47,17 @@ before. Type inference is Polars' default.
 - `columns`: a column name or a list of names to read. The resulting frame
   keeps the requested order and contains only those columns. Unknown,
   duplicate, and empty names are errors.
+- `rename_columns`: a non-empty, contiguous list of replacement names. Names
+  are applied positionally to the columns of the frame that would otherwise be
+  returned, so they compose with `columns`, `dtypes`, `null_values`, and the row
+  window. Supplying fewer names renames only that prefix; supplying more names
+  than the frame has columns, duplicate results, empty names, lists with holes,
+  and non-string entries are errors. `dtypes` still names the file's original
+  columns because it is applied before the rename.
+- `encoding`: `"utf8"` (default) or `"utf8-lossy"`, matched
+  case-insensitively. Strict UTF-8 raises on invalid bytes; lossy mode replaces
+  each invalid byte sequence with `U+FFFD` (`"\239\191\189"` in Lua strings).
+  Other values are errors.
 - `dtypes`: a table mapping column names to dtype names, applied by name at
   read time instead of relying on inference. Supported dtypes are `bool` /
   `boolean`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, and `str` / `string` /
@@ -86,13 +99,19 @@ local window = polars.read_csv("export.csv", {
   skip_rows = 2,
   n_rows = 100,
 })
+local renamed = polars.read_csv("headerless.csv", {
+  header = false,
+  rename_columns = { "id", "name", "score" },
+})
+local lossy = polars.read_csv("legacy.csv", { encoding = "utf8-lossy" })
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
 collisions, invalid projection names, unsupported or missing dtype overrides,
-invalid null-value markers, negative or fractional row-window counts, a missing
-or unreadable path, and files that cannot be parsed.
+invalid null-value markers, invalid rename lists, unsupported encodings,
+negative or fractional row-window counts, a missing or unreadable path, and
+files that cannot be parsed.
 
 ### `polars.read_parquet(path) -> DataFrame`
 
@@ -256,6 +275,9 @@ and empty fields for nulls, as before.
 - `null_value`: the literal placeholder written for null fields, default the
   empty string. Polars writes it without quoting, so a value containing the
   delimiter, `"`, NUL, newline, or carriage return is rejected.
+- `line_terminator`: `"\n"` (default) or `"\r\n"`; the terminator is written
+  after the header and every record. Other values are errors, keeping the
+  output readable by the reader and by RFC 4180 consumers.
 
 ```lua
 df:write_csv("out.csv")
@@ -264,6 +286,7 @@ df:write_csv("out.tsv", {
   header = false,
   null_value = "NA",
 })
+df:write_csv("crlf.csv", { line_terminator = "\r\n" })
 ```
 
 Unknown option keys and invalid types are errors, as are closed frames,
@@ -323,6 +346,22 @@ PlFrame *pl_dataframe_read_csv_row_window(
     const char *const *dtypes, uint64_t dtype_count,
     const char *const *null_values, uint64_t null_value_count,
     uint64_t skip_rows, int64_t n_rows, char **err);
+PlFrame *pl_dataframe_read_csv_encoded(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    uint64_t skip_rows, int64_t n_rows, const char *encoding, char **err);
+PlFrame *pl_dataframe_read_csv_renamed(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    uint64_t skip_rows, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
@@ -339,6 +378,10 @@ int pl_dataframe_write_csv(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_csv_options(
     PlFrame *frame, const char *path, const char *delimiter,
     int32_t has_header, const char *null_value, char **err);
+int pl_dataframe_write_csv_full(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value,
+    const char *line_terminator, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
@@ -396,6 +439,20 @@ counts are `uint64_t`/`int64_t` at the ABI; the Lua wrapper restricts them to
 non-negative safe integers and rejects fractional or non-numeric values before
 the call.
 
+`pl_dataframe_read_csv_encoded` is additive and combines every earlier reader
+option with a text encoding. `encoding` is borrowed for the duration of the
+call; a null or empty string keeps strict UTF-8, `utf8` selects it explicitly,
+`utf8-lossy` substitutes U+FFFD for invalid bytes, and other names are errors.
+The remaining arguments match `pl_dataframe_read_csv_row_window`.
+
+`pl_dataframe_read_csv_renamed` is additive and combines every earlier reader
+option with positionally applied replacement names. It borrows
+`rename_column_count` UTF-8 names; a null array or zero count disables renaming.
+Names replace the leading columns of the returned frame, so they apply after
+projection and dtype overrides. Fewer names than columns renames only that
+prefix; more names than columns, empty names, and duplicate resulting names are
+errors. The encoding argument follows `pl_dataframe_read_csv_encoded`.
+
 `pl_dataframe_write_csv_options` is additive; `pl_dataframe_write_csv` keeps
 its signature and comma/header/empty-null defaults. A null `delimiter` means
 `","`; `has_header` is zero to omit the header row. A null or empty
@@ -403,6 +460,12 @@ its signature and comma/header/empty-null defaults. A null `delimiter` means
 literally, so it may not contain the delimiter, `"`, NUL, newline, or
 carriage-return bytes. All string arguments are borrowed for the duration of
 the call.
+
+`pl_dataframe_write_csv_full` is the superset writer entry point. It combines
+the earlier delimiter, header, and null-value arguments with `line_terminator`:
+a null or empty string keeps `"\n"`, `"\r\n"` writes CRLF records, and every
+other value is an error. The terminator is written literally after the header
+and each data row. Earlier writer signatures and defaults are unchanged.
 
 ## Install layouts
 
@@ -462,7 +525,9 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV reader column projection and dtype overrides.
 - [x] CSV reader null-value markers.
 - [x] CSV reader row windows (`skip_rows`, `n_rows`).
+- [x] CSV reader positional column renaming and UTF-8 lossy decoding.
 - [x] CSV writer delimiter, header, and null-value options.
+- [x] CSV writer line terminator (`\n`, `\r\n`).
 - [x] LuaRocks source-rock packaging.
 - [ ] LazyFrame/expressions.
 - [ ] Arrow C Data Interface with `polars-ffi` and a numlua adapter.
