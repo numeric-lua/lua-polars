@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.18.0
+
+- five DataFrame/IO additions:
+  - `df:drop_nulls([columns])` accepts a single column or a non-empty list and
+    drops rows whose nulls occur in those columns only; no argument keeps the
+    earlier all-column behavior, and unknown, duplicate, empty, or malformed
+    names and non-contiguous lists are rejected;
+  - `df:fill_null(value [, columns])` fills nulls with a finite number, string,
+    or boolean, optionally limited to selected columns; `nil`, `"zero"`, and
+    `"one"` keep the earlier `0`/`1` aliases, while SQL-literal escaping makes
+    strings containing quotes safe and non-finite numbers, NUL bytes, invalid
+    types, and bad subsets explicit errors;
+  - `df:value_counts(columns [, options])` counts distinct combinations of one
+    or more key columns, appends a `count` column, sorts by count descending
+    with deterministic key tie-breaks, and supports `sort = false` and a custom
+    count-column `name`;
+  - `polars.read_csv(..., { truncate_ragged_lines = true, ignore_errors = true })`
+    truncates rows wider than the header and turns values Polars cannot parse
+    into nulls instead of failing the whole read; both flags compose with every
+    earlier reader option and reject non-boolean values;
+  - `df:write_csv(..., { float_precision = n })` writes float columns with `n`
+    digits after the decimal point, including `0`, and composes with the
+    delimiter, header, null-value, line-terminator, and quote-style options;
+- the additive C ABI entry points are `pl_dataframe_read_csv_lenient` and
+  `pl_dataframe_write_csv_precise`; every earlier reader and writer signature
+  and default is unchanged;
+- validation covers non-contiguous and unknown column subsets, duplicate names,
+  count-name collisions, non-boolean lenient flags, non-finite fill values, NUL
+  fill strings, negative/fractional/non-numeric/above-`2^53 - 1` float
+  precision, closed frames, and filesystem/parse failures;
+- tests cover column-scoped null handling, literal and boolean fills, quoted
+  fill strings, sorted and unsorted value counts, custom count names, truncated
+  ragged rows, recovered parse errors, float precision including zero and
+  combined writer options, and the installed-tree path through the prefix smoke
+  test and LuaRocks check;
+- `./scripts/test.sh` passed 137 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validate the installed-prefix and LuaRocks layouts
+  for 0.18.0-1;
+- the 0.18.0 tag is created for this release.
+
 ## 0.17.0
 
 - five DataFrame/IO additions:

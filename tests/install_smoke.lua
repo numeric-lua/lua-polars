@@ -18,8 +18,8 @@ check(source:sub(1, 1) == "@", "module source is not a file path")
 local module_path = source:sub(2)
 check(module_path:sub(1, #prefix) == prefix,
   "loaded polars from outside the installed prefix: " .. module_path)
-check(polars.version() == "0.17.0", "unexpected bridge version")
-check(polars._VERSION == "0.17.0", "unexpected Lua module version")
+check(polars.version() == "0.18.0", "unexpected bridge version")
+check(polars._VERSION == "0.18.0", "unexpected Lua module version")
 
 local df = polars.read_csv(fixture)
 local rows, cols = df:shape()
@@ -148,6 +148,67 @@ local roundtrip_fixture = fixture:gsub("sample%.csv$", "roundtrip.csv")
 local written = os.tmpname()
 os.remove(written)
 local writer = polars.read_csv(roundtrip_fixture)
+
+local complete = writer:drop_nulls("note")
+check(complete:shape() == 2, "unexpected drop_nulls subset shape")
+complete:close()
+local filled = writer:fill_null("missing", "note")
+check(filled:to_table()[3].note == "missing",
+  "unexpected fill_null subset value")
+filled:close()
+local counts = polars.read_csv(fixture):value_counts("team")
+check(counts:shape() == 2 and counts:columns()[2] == "count",
+  "unexpected value_counts shape")
+check(counts:to_table()[1].team == "red" and counts:to_table()[1].count == 3,
+  "unexpected value_counts result")
+counts:close()
+
+local lenient_path = os.tmpname()
+local lenient_file = assert(io.open(lenient_path, "w"))
+lenient_file:write("name,team,score\nana,red,10\nbia,blue,20,extra\n" ..
+  "caio,red,30\n")
+lenient_file:close()
+local strict_ragged = pcall(polars.read_csv, lenient_path)
+check(strict_ragged == false, "ragged CSV accepted without truncation")
+local ragged = polars.read_csv(lenient_path, { truncate_ragged_lines = true })
+check(ragged:shape() == 3, "unexpected truncated ragged shape")
+check(ragged:to_table()[2].score == 20, "unexpected truncated ragged value")
+ragged:close()
+os.remove(lenient_path)
+
+local errors_path = os.tmpname()
+local errors_file = assert(io.open(errors_path, "w"))
+errors_file:write("id,score\n1,10\n2,oops\n3,30\n")
+errors_file:close()
+local recovered = polars.read_csv(errors_path, {
+  dtypes = { score = "i64" },
+  ignore_errors = true,
+})
+check(recovered:shape() == 3, "unexpected ignore_errors shape")
+check(recovered:to_table()[2].score == polars.null,
+  "unexpected ignore_errors null")
+recovered:close()
+os.remove(errors_path)
+
+local float_path = os.tmpname()
+local float_file = assert(io.open(float_path, "w"))
+float_file:write("id,ratio\n1,1.23456\n2,2.5\n")
+float_file:close()
+local floats = polars.read_csv(float_path)
+local rounded_path = os.tmpname()
+os.remove(rounded_path)
+floats:write_csv(rounded_path, { float_precision = 2 })
+local rounded_file = assert(io.open(rounded_path, "rb"))
+local rounded_raw = rounded_file:read("*a")
+rounded_file:close()
+check(rounded_raw:find("1,1.23\n", 1, true) ~= nil,
+  "unexpected float precision output")
+check(rounded_raw:find("2,2.50\n", 1, true) ~= nil,
+  "unexpected float precision padding")
+floats:close()
+os.remove(float_path)
+os.remove(rounded_path)
+
 writer:write_csv(written, {
   delimiter = ";",
   header = false,

@@ -1,4 +1,4 @@
-# lua-polars API — 0.17.0
+# lua-polars API — 0.18.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.17.0"`).
+Returns the bridge version (`"0.18.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -275,9 +275,9 @@ and malformed names are errors, and the result keeps the original schema and
 column order.
 
 ```lua
-local complete = df:drop_nulls()              -- any null
-local scored = df:drop_nulls("score")        -- only null scores
-local keyed = df:drop_nulls({ "id", "name" }) -- either key null
+local complete = df:drop_nulls()               -- any null
+local scored = df:drop_nulls("score")          -- only null scores
+local keyed = df:drop_nulls({ "id", "name" })  -- either key null
 ```
 
 ### `df:fill_null(value [, columns]) -> DataFrame`
@@ -287,7 +287,8 @@ be a finite number, a string, or a boolean; `nil` and the strings `"zero"` and
 `"one"` keep the earlier strategy aliases for `0` and `1`. The value is
 formatted as a SQL literal, so string content is escaped and `"O'Reilly"`
 round-trips. `columns` is a single name or a non-empty contiguous list; when
-omitted every column is filled and unselected columns keep their nulls.
+omitted every column is filled, and when a subset is given the non-selected
+columns keep their nulls.
 
 ```lua
 local labeled = df:fill_null("unknown", "note")
@@ -825,7 +826,7 @@ failure.
 
 ### LuaRocks source rock
 
-`lua-polars-0.17.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.18.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -834,13 +835,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.17.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.18.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.17.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.18.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch

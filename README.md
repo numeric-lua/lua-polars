@@ -26,7 +26,7 @@ end
 
 ## Status
 
-`0.17.0` is an eager-first MVP:
+`0.18.0` is an eager-first MVP:
 
 - CSV, Parquet, and JSON readers and writers
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
@@ -44,7 +44,7 @@ end
   `ignore_errors = true` to keep parsable rows when a value cannot be parsed
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, a literal `null_value` placeholder for null fields, a
-  `line_terminator` of `"\n"` or `"\r\n"`, and a `quote_style` of
+  `line_terminator` of `"\n"` or `"\r\n"`, a `quote_style` of
   `"necessary"`, `"always"`, `"non_numeric"`, or `"never"`, and a
   non-negative `float_precision` for float columns
 - Parquet reader options: a `columns` name/list projection and a
@@ -134,17 +134,17 @@ Lua loader also searches the directories on `package.cpath`, so no
 `POLARS_LUA_LIB` is needed.
 
 ```sh
-luarocks make lua-polars-0.17.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.18.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 For a clean checkout the first command compiles Polars; set
 `CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec and
-`scripts/build.sh` default to one job). The source URL points at the `v0.17.0`
+`scripts/build.sh` default to one job). The source URL points at the `v0.18.0`
 tag, which is created as part of the release: use `luarocks make` from a
 checkout before the tag exists, and
-`luarocks build lua-polars-0.17.0-1.rockspec` afterwards. Both use the same
+`luarocks build lua-polars-0.18.0-1.rockspec` afterwards. Both use the same
 build and install commands.
 
 ## Install into a prefix
