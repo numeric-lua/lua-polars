@@ -124,6 +124,11 @@ int pl_dataframe_write_csv_configured(
     PlFrame *frame, const char *path, const char *delimiter,
     int32_t has_header, const char *null_value,
     const char *line_terminator, const char *quote_style, char **err);
+int pl_dataframe_write_csv_precise(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value,
+    const char *line_terminator, const char *quote_style,
+    int64_t float_precision, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
@@ -396,12 +401,15 @@ local function write_frame(self, path, method)
   return self
 end
 
+local MAX_SAFE_INTEGER = 9007199254740991
+
 local WRITE_CSV_OPTION_KEYS = {
   delimiter = true,
   header = true,
   null_value = true,
   line_terminator = true,
   quote_style = true,
+  float_precision = true,
 }
 
 local CSV_QUOTE_STYLES = {
@@ -468,6 +476,20 @@ local function write_csv_null_value(value, delimiter)
   return value
 end
 
+-- Polars formats float columns with this many digits after the decimal point.
+-- A nil option keeps its shortest round-trippable representation, so zero and
+-- positive counts are both meaningful.
+local function write_csv_float_precision(value)
+  if value == nil then
+    return nil
+  end
+  if type(value) ~= "number" or value < 0 or value % 1 ~= 0 or
+      value > MAX_SAFE_INTEGER then
+    error("write_csv float_precision must be a non-negative integer", 3)
+  end
+  return value
+end
+
 local function write_csv_options(options)
   if type(options) ~= "table" then
     error("write_csv options must be a table", 3)
@@ -497,14 +519,13 @@ local function write_csv_options(options)
   end
   return delimiter, header,
     write_csv_null_value(options.null_value, delimiter), line_terminator,
-    write_csv_quote_style(options.quote_style)
+    write_csv_quote_style(options.quote_style),
+    write_csv_float_precision(options.float_precision)
 end
 
 local function quote_identifier(name)
   return '"' .. tostring(name):gsub('"', '""') .. '"'
 end
-
-local MAX_SAFE_INTEGER = 9007199254740991
 
 local PARQUET_WRITE_OPTION_KEYS = {
   compression = true,
@@ -826,11 +847,15 @@ function DataFrame:write_csv(path, options)
   if type(path) ~= "string" or path == "" then
     error("write_csv path must be a string", 2)
   end
-  local delimiter, header, null_value, line_terminator, quote_style =
-    write_csv_options(options)
+  local delimiter, header, null_value, line_terminator, quote_style,
+    float_precision = write_csv_options(options)
   local err = ffi.new("char *[1]")
   local status
-  if quote_style ~= nil then
+  if float_precision ~= nil then
+    status = lib.pl_dataframe_write_csv_precise(self:_require_open(), path,
+      delimiter, header and 1 or 0, null_value, line_terminator,
+      quote_style or "necessary", float_precision, err)
+  elseif quote_style ~= nil then
     status = lib.pl_dataframe_write_csv_configured(self:_require_open(), path,
       delimiter, header and 1 or 0, null_value, line_terminator, quote_style,
       err)

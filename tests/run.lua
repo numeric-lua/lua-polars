@@ -1935,6 +1935,58 @@ test("CSV writer quote_style combines with other writer options", function()
   loaded:close()
   df:close()
 end)
+test("CSV writer float_precision controls float digits", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,ratio\n1,1.23456\n2,2.5\n3,3.14159\n")
+  file:close()
+  local df = polars.read_csv(path)
+  eq(df:schema().ratio, "f64")
+  local out = new_temp_path(".csv")
+
+  eq(df:write_csv(out, { float_precision = 2 }), df,
+    "float_precision return value")
+  local raw = read_file(out)
+  truthy(raw:find("1,1.23\n", 1, true), "two-digit first row")
+  truthy(raw:find("2,2.50\n", 1, true), "two-digit padding")
+  truthy(raw:find("3,3.14\n", 1, true), "two-digit rounding")
+  local loaded = polars.read_csv(out)
+  eq(loaded:schema().ratio, "f64")
+  eq(loaded:to_table()[2].ratio, 2.5)
+  loaded:close()
+
+  df:write_csv(out, { float_precision = 0 })
+  raw = read_file(out)
+  truthy(raw:find("1,1\n", 1, true), "zero-digit first row")
+  truthy(raw:find("2,2\n", 1, true), "zero-digit rounding")
+  truthy(raw:find("3,3\n", 1, true), "zero-digit third row")
+
+  df:write_csv(out, { float_precision = 6 })
+  raw = read_file(out)
+  truthy(raw:find("1,1.234560\n", 1, true), "six-digit padding")
+
+  df:write_csv(out, {
+    delimiter = ";",
+    header = false,
+    line_terminator = "\r\n",
+    quote_style = "always",
+    float_precision = 1,
+  })
+  raw = read_file(out)
+  truthy(raw:find('"1";"1.2"\r\n', 1, true),
+    "precision combined with writer options")
+  truthy(raw:find('"3";"3.1"\r\n', 1, true),
+    "precision combined rounding")
+  loaded = polars.read_csv(out, {
+    delimiter = ";",
+    header = false,
+    rename_columns = { "id", "ratio" },
+  })
+  eq(loaded:shape(), 3)
+  eq(loaded:to_table()[1].ratio, 1.2)
+  loaded:close()
+  df:close()
+end)
 test("CSV writer defaults stay comma, header, and empty null", function()
   local df = polars.read_csv(roundtrip_fixture)
   local out = new_temp_path(".csv")
@@ -1953,6 +2005,12 @@ test("CSV writer rejects invalid options", function()
     { { quote_style = 42 }, "quote_style must be a non-empty string" },
     { { quote_style = "" }, "quote_style must be a non-empty string" },
     { { quote_style = "sometimes" }, "quote_style must be one of" },
+    { { float_precision = -1 }, "float_precision must be a non-negative integer" },
+    { { float_precision = 1.5 }, "float_precision must be a non-negative integer" },
+    { { float_precision = "2" }, "float_precision must be a non-negative integer" },
+    { { float_precision = true }, "float_precision must be a non-negative integer" },
+    { { float_precision = math.huge }, "float_precision must be a non-negative integer" },
+    { { float_precision = 2 ^ 53 }, "float_precision must be a non-negative integer" },
     { { delimiter = 59 }, "delimiter must be a one-byte string" },
     { { delimiter = "" }, "delimiter" },
     { { delimiter = ";;" }, "delimiter" },

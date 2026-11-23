@@ -88,6 +88,7 @@ struct CsvWriteConfig {
     null_value: Option<String>,
     line_terminator: String,
     quote_style: QuoteStyle,
+    float_precision: Option<usize>,
 }
 
 impl Default for CsvWriteConfig {
@@ -98,6 +99,7 @@ impl Default for CsvWriteConfig {
             null_value: None,
             line_terminator: "\n".to_string(),
             quote_style: QuoteStyle::Necessary,
+            float_precision: None,
         }
     }
 }
@@ -1800,7 +1802,8 @@ fn write_csv_frame(df: &DataFrame, path: &str, config: CsvWriteConfig) -> Result
         .include_header(config.include_header)
         .with_separator(config.delimiter)
         .with_line_terminator(PlSmallStr::from_str(&config.line_terminator))
-        .with_quote_style(config.quote_style);
+        .with_quote_style(config.quote_style)
+        .with_float_precision(config.float_precision);
     if let Some(null_value) = config.null_value {
         writer = writer.with_null_value(PlSmallStr::from_str(&null_value));
     }
@@ -1910,6 +1913,7 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_full(
             null_value: read_csv_null_value(null_value, delimiter)?,
             line_terminator: read_csv_line_terminator(line_terminator)?,
             quote_style: QuoteStyle::Necessary,
+            float_precision: None,
         };
         write_csv_frame(&frame.df, &path, config)
     }));
@@ -1952,6 +1956,61 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_configured(
             null_value: read_csv_null_value(null_value, delimiter)?,
             line_terminator: read_csv_line_terminator(line_terminator)?,
             quote_style: parse_csv_quote_style(quote_style_name.as_deref())?,
+            float_precision: None,
+        };
+        write_csv_frame(&frame.df, &path, config)
+    }));
+    finish_write(result, err)
+}
+
+/// Writes a CSV file with every earlier writer option plus float precision.
+///
+/// The delimiter, header, null-value, line-terminator, and quote-style
+/// arguments have the same meaning as in
+/// [`pl_dataframe_write_csv_configured`]. `float_precision` is a non-negative
+/// number of digits after the decimal point for float columns; `-1` keeps
+/// Polars' default shortest representation. This entry point is additive;
+/// every earlier writer signature and default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_csv_precise(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    null_value: *const c_char,
+    line_terminator: *const c_char,
+    quote_style: *const c_char,
+    float_precision: i64,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let delimiter = read_delimiter(delimiter)?;
+        let quote_style_name = if quote_style.is_null() {
+            None
+        } else {
+            Some(read_utf8(quote_style, "quote_style")?)
+        };
+        let float_precision = if float_precision == -1 {
+            None
+        } else if float_precision < 0 {
+            return Err(format!(
+                "CSV float_precision must be -1 for the default or a non-negative count, got {float_precision}"
+            ));
+        } else {
+            Some(
+                usize::try_from(float_precision)
+                    .map_err(|_| "CSV float_precision is too large for this platform".to_string())?,
+            )
+        };
+        let config = CsvWriteConfig {
+            delimiter,
+            include_header: has_header != 0,
+            null_value: read_csv_null_value(null_value, delimiter)?,
+            line_terminator: read_csv_line_terminator(line_terminator)?,
+            quote_style: parse_csv_quote_style(quote_style_name.as_deref())?,
+            float_precision,
         };
         write_csv_frame(&frame.df, &path, config)
     }));

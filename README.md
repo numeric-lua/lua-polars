@@ -45,7 +45,8 @@ end
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, a literal `null_value` placeholder for null fields, a
   `line_terminator` of `"\n"` or `"\r\n"`, and a `quote_style` of
-  `"necessary"`, `"always"`, `"non_numeric"`, or `"never"`
+  `"necessary"`, `"always"`, `"non_numeric"`, or `"never"`, and a
+  non-negative `float_precision` for float columns
 - Parquet reader options: a `columns` name/list projection and a
   `skip_rows`/`n_rows` window that keeps the file schema for empty results
 - Parquet writer options: a `compression` codec (`zstd`, `snappy`, `gzip`,
@@ -223,6 +224,7 @@ df:write_csv("out.tsv", {
 })
 df:write_csv("out-crlf.csv", { line_terminator = "\r\n" })
 df:write_csv("quoted.csv", { quote_style = "always" })
+df:write_csv("rounded.csv", { float_precision = 2 })
 df:write_parquet("out.parquet")
 df:write_parquet("out.parquet", {
   compression = "snappy",

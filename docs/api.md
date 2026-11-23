@@ -457,6 +457,10 @@ and empty fields for nulls, as before.
   (never quote). Values are matched case-insensitively. `"never"` can produce
   invalid CSV when a field contains the delimiter, a quote, or a line break,
   matching Polars; use it only for controlled output.
+- `float_precision`: a non-negative integer number of digits after the decimal
+  point for float columns. `0` writes whole-number-rounded floats, `2` writes
+  values such as `2.50`, and omitting the option keeps Polars' shortest
+  round-trippable representation. It composes with every other writer option.
 
 ```lua
 df:write_csv("out.csv")
@@ -467,9 +471,11 @@ df:write_csv("out.tsv", {
 })
 df:write_csv("crlf.csv", { line_terminator = "\r\n" })
 df:write_csv("quoted.csv", { quote_style = "always" })
+df:write_csv("rounded.csv", { float_precision = 2 })
 ```
 
-Unknown option keys and invalid types are errors, as are closed frames,
+Unknown option keys and invalid types are errors, as are negative, fractional,
+non-numeric, or above-`2^53 - 1` float precision values, closed frames,
 non-string or empty paths, and write failures.
 
 ### `df:write_json(path [, options]) -> DataFrame`
@@ -659,6 +665,11 @@ int pl_dataframe_write_csv_configured(
     PlFrame *frame, const char *path, const char *delimiter,
     int32_t has_header, const char *null_value,
     const char *line_terminator, const char *quote_style, char **err);
+int pl_dataframe_write_csv_precise(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value,
+    const char *line_terminator, const char *quote_style,
+    int64_t float_precision, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
@@ -675,6 +686,11 @@ void pl_string_free(char *value);
 truncates rows wider than the header, and `ignore_errors` turns values that
 cannot be parsed into nulls while keeping the rest of the rows. Both flags are
 zero by default in every earlier reader entry point.
+
+`pl_dataframe_write_csv_precise` is additive and carries every option from
+`pl_dataframe_write_csv_configured` plus `int64_t float_precision`, where `-1`
+keeps Polars' default formatting and non-negative values set the number of
+digits after the decimal point for float columns.
 
 Returned `char *` values and error strings must be freed with
 `pl_string_free`. A null frame pointer indicates an error when `err` is set.
