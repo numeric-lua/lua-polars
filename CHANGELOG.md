@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.20.0
+
+- five DataFrame/IO additions:
+  - `df:fill_nan(value [, columns])` replaces floating-point NaN values with a
+    finite number while leaving nulls untouched, targeting every Float32/Float64
+    column by default or a validated column subset;
+  - `df:drop_nans([columns])` drops rows containing a NaN in any targeted float
+    column while keeping nulls, with the same all-float default and validated
+    column subsets;
+  - `polars.read_csv(..., { raise_if_empty = false })` reads a file with no
+    header and no records as an empty frame instead of raising, while malformed
+    files still fail and header-only files keep their header-derived schema;
+  - `df:write_csv(..., { include_bom = true })` prepends a UTF-8 byte-order mark
+    and composes with the delimiter, header, null-value, line-terminator,
+    quote-style, and float-precision options;
+  - `df:write_csv(..., { decimal_comma = true })` serializes float fields with a
+    comma decimal separator, intended with a semicolon or tab delimiter and
+    round-tripping through the reader's existing `decimal_comma` option;
+- the additive C ABI entry points are `pl_dataframe_fill_nan`,
+  `pl_dataframe_drop_nans`, `pl_dataframe_read_csv_empty_policy`, and
+  `pl_dataframe_write_csv_complete`; every earlier signature and default is
+  unchanged, and non-float columns in a NaN subset are ignored;
+- validation covers non-finite fill values, malformed or duplicate column
+  subsets, unknown columns, closed frames, non-boolean `raise_if_empty`,
+  `include_bom`, and `decimal_comma`, and malformed files that must still fail
+  when empty-file handling is relaxed;
+- tests cover NaN replacement and dropping with null preservation, subset
+  isolation, empty and header-only CSV reads, UTF-8 BOM output with combined
+  writer options, decimal-comma output and round-trips, and every new error
+  path, including the installed-prefix smoke test;
+- `./scripts/test.sh` passed 156 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validate the installed-prefix and LuaRocks layouts
+  for 0.20.0-1;
+- the 0.20.0 tag is created for this release.
+
 ## 0.19.0
 
 - five DataFrame/IO additions:

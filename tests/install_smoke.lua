@@ -18,8 +18,8 @@ check(source:sub(1, 1) == "@", "module source is not a file path")
 local module_path = source:sub(2)
 check(module_path:sub(1, #prefix) == prefix,
   "loaded polars from outside the installed prefix: " .. module_path)
-check(polars.version() == "0.19.0", "unexpected bridge version")
-check(polars._VERSION == "0.19.0", "unexpected Lua module version")
+check(polars.version() == "0.20.0", "unexpected bridge version")
+check(polars._VERSION == "0.20.0", "unexpected Lua module version")
 
 local df = polars.read_csv(fixture)
 local rows, cols = df:shape()
@@ -56,6 +56,38 @@ local teams = transforms:unique("team")
 check(teams:shape() == 2, "unexpected unique subset shape")
 teams:close()
 transforms:close()
+
+local nan_source = polars.read_csv(fixture)
+local nan = nan_source:sql([[
+  SELECT "score",
+         CASE WHEN "score" = 7 THEN NULL
+              WHEN "score" = 10 THEN 0.0 / 0.0
+              ELSE CAST("score" AS DOUBLE) END AS "x"
+  FROM df
+]])
+local filled_nan = nan:fill_nan(2.5)
+check(filled_nan:to_table()[1].x == 2.5, "unexpected fill_nan value")
+check(filled_nan:to_table()[2].x == polars.null,
+  "fill_nan replaced a null")
+filled_nan:close()
+local dropped_nan = nan:drop_nans()
+check(dropped_nan:shape() == 4, "unexpected drop_nans shape")
+check(dropped_nan:to_table()[1].x == polars.null,
+  "drop_nans removed a null row")
+dropped_nan:close()
+nan:close()
+nan_source:close()
+
+local empty_path = os.tmpname()
+local empty_file = assert(io.open(empty_path, "w"))
+empty_file:close()
+check(pcall(polars.read_csv, empty_path) == false,
+  "empty CSV accepted without raise_if_empty = false")
+local empty = polars.read_csv(empty_path, { raise_if_empty = false })
+check(empty:shape() == 0 and #empty:columns() == 0,
+  "unexpected empty CSV frame")
+empty:close()
+os.remove(empty_path)
 
 local projected = polars.read_csv(fixture, { columns = { "score", "name" } })
 local projected_rows, projected_cols = projected:shape()
@@ -163,6 +195,18 @@ local written = os.tmpname()
 os.remove(written)
 local writer = polars.read_csv(roundtrip_fixture)
 
+local bom_path = os.tmpname()
+os.remove(bom_path)
+writer:write_csv(bom_path, { include_bom = true })
+local bom_handle = assert(io.open(bom_path, "rb"))
+local bom_raw = bom_handle:read("*a")
+bom_handle:close()
+check(bom_raw:sub(1, 3) == "\239\187\191", "missing UTF-8 BOM")
+local bom_loaded = polars.read_csv(bom_path)
+check(bom_loaded:shape() == 3, "unexpected BOM round-trip shape")
+bom_loaded:close()
+os.remove(bom_path)
+
 local complete = writer:drop_nulls("note")
 check(complete:shape() == 2, "unexpected drop_nulls subset shape")
 complete:close()
@@ -219,6 +263,22 @@ check(rounded_raw:find("1,1.23\n", 1, true) ~= nil,
   "unexpected float precision output")
 check(rounded_raw:find("2,2.50\n", 1, true) ~= nil,
   "unexpected float precision padding")
+local comma_path = os.tmpname()
+os.remove(comma_path)
+floats:write_csv(comma_path, { delimiter = ";", decimal_comma = true })
+local comma_handle = assert(io.open(comma_path, "rb"))
+local comma_raw = comma_handle:read("*a")
+comma_handle:close()
+check(comma_raw:find("1;1,23456\n", 1, true) ~= nil,
+  "unexpected decimal comma output")
+local comma_loaded = polars.read_csv(comma_path, {
+  delimiter = ";",
+  decimal_comma = true,
+})
+check(comma_loaded:to_table()[2].ratio == 2.5,
+  "unexpected decimal comma round-trip")
+comma_loaded:close()
+os.remove(comma_path)
 floats:close()
 os.remove(float_path)
 os.remove(rounded_path)

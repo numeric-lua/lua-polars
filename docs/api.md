@@ -1,4 +1,4 @@
-# lua-polars API — 0.19.0
+# lua-polars API — 0.20.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.19.0"`).
+Returns the bridge version (`"0.20.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -44,6 +44,12 @@ Polars' default.
   data rows read after the header. `n_rows = 0` reads no data rows while
   keeping the header-derived schema; a limit larger than the file reads the
   remaining rows. Like `skip_rows`, it must be at most `2^53 - 1`.
+- `raise_if_empty`: a boolean, default `true`. Polars treats a file with no
+  header and no records as empty and raises. Set it to `false` to read such a
+  file as an empty frame instead; the result has no columns because no header
+  was available. A header-only file is not empty and keeps its header-derived
+  schema in either mode. It composes with every other reader option. Non-boolean
+  values are errors, and malformed or ragged files still fail the read.
 - `decimal_comma`: a boolean, default `false`. When true, a comma is parsed as
   the decimal separator for numeric columns, which is useful with a semicolon
   or tab `delimiter`. It does not change the field delimiter; the delimiter
@@ -155,15 +161,18 @@ local recovered = polars.read_csv("legacy.csv", {
   dtypes = { score = "i64" },
   ignore_errors = true,
 })
+local optional = polars.read_csv("maybe-empty.csv", {
+  raise_if_empty = false,
+})
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
 collisions, invalid projection names, unsupported or missing dtype overrides,
 invalid or per-column null-value markers, invalid rename lists, unsupported
-encodings, non-boolean lenient options, invalid post-header or pre-header row
-counts, non-boolean `decimal_comma`, a missing or unreadable path, and files
-that cannot be parsed.
+encodings, non-boolean lenient options, non-boolean `raise_if_empty`, invalid
+post-header or pre-header row counts, non-boolean `decimal_comma`, a missing or
+unreadable path, and files that cannot be parsed.
 
 ### `polars.read_parquet(path [, options]) -> DataFrame`
 
@@ -396,6 +405,43 @@ Non-finite numbers, NUL in a fill string, tables/functions, and malformed,
 unknown, or duplicate column subsets are errors. Type conflicts between the
 fill value and a column are reported by Polars.
 
+### `df:fill_nan(value [, columns]) -> DataFrame`
+
+Replaces floating-point NaN values with a finite scalar. NaN is a separate
+missing-value state from null: `fill_nan` leaves null values untouched, unlike
+`fill_null`. With no column argument every `Float32`/`Float64` column is
+targeted. `columns` is a single name or a non-empty contiguous list; each named
+column must exist, and non-float columns in the subset are left unchanged
+because they cannot contain NaN. The input frame is unchanged and column order
+is preserved.
+
+```lua
+local cleaned = df:fill_nan(0)
+local scored = df:fill_nan(2.5, "score")
+```
+
+`value` must be a finite number; strings, booleans, tables, NaN, and positive or
+negative infinity are errors. Unknown, duplicate, empty, or non-contiguous
+column subsets and closed frames are also errors.
+
+### `df:drop_nans([columns]) -> DataFrame`
+
+Drops rows that contain a NaN in any targeted float column. Nulls are kept
+because they are a distinct missing-value state. With no argument every
+`Float32`/`Float64` column participates. `columns` is a single name or a
+non-empty contiguous list; every named column must exist, and non-float columns
+in the subset are ignored because they cannot contain NaN. The result keeps the
+original schema and column order, and the input frame is unchanged.
+
+```lua
+local finite = df:drop_nans()
+local scored = df:drop_nans("score")
+local paired = df:drop_nans({ "score", "bonus" })
+```
+
+Unknown, duplicate, empty, or non-contiguous column subsets and closed frames
+are errors.
+
 ### `df:sql(query) -> DataFrame`
 
 Runs a Polars SQL query with the current frame registered as table `df`. The
@@ -558,6 +604,16 @@ and empty fields for nulls, as before.
   point for float columns. `0` writes whole-number-rounded floats, `2` writes
   values such as `2.50`, and omitting the option keeps Polars' shortest
   round-trippable representation. It composes with every other writer option.
+- `include_bom`: a boolean, default `false`. `true` prepends a UTF-8 byte-order
+  mark (`"\239\187\191"`) before the header or first record, which helps some
+  spreadsheet tools detect UTF-8. The reader accepts the BOM and keeps the
+  header name clean. It composes with every other writer option.
+- `decimal_comma`: a boolean, default `false`. `true` serializes float fields
+  with a comma decimal separator, intended with a semicolon or tab `delimiter`.
+  It changes only how floats are formatted; the field delimiter is still
+  controlled by `delimiter`, and integers, strings, and nulls are unaffected.
+  Read the result back with `read_csv(..., { delimiter = ";", decimal_comma =
+  true })`.
 
 ```lua
 df:write_csv("out.csv")
@@ -569,11 +625,14 @@ df:write_csv("out.tsv", {
 df:write_csv("crlf.csv", { line_terminator = "\r\n" })
 df:write_csv("quoted.csv", { quote_style = "always" })
 df:write_csv("rounded.csv", { float_precision = 2 })
+df:write_csv("utf8.csv", { include_bom = true })
+df:write_csv("european.csv", { delimiter = ";", decimal_comma = true })
 ```
 
 Unknown option keys and invalid types are errors, as are negative, fractional,
-non-numeric, or above-`2^53 - 1` float precision values, closed frames,
-non-string or empty paths, and write failures.
+non-numeric, or above-`2^53 - 1` float precision values, non-boolean
+`include_bom`/`decimal_comma`, closed frames, non-string or empty paths, and
+write failures.
 
 ### `df:write_json(path [, options]) -> DataFrame`
 
@@ -740,6 +799,19 @@ PlFrame *pl_dataframe_read_csv_extended(
     const char *encoding, int32_t try_parse_dates,
     int32_t decimal_comma, int32_t truncate_ragged_lines,
     int32_t ignore_errors, char **err);
+PlFrame *pl_dataframe_read_csv_empty_policy(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, uint64_t skip_rows_after_header, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t decimal_comma, int32_t truncate_ragged_lines,
+    int32_t ignore_errors, int32_t raise_if_empty, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -760,6 +832,12 @@ PlFrame *pl_dataframe_with_row_index(
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_cast(
     PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
+PlFrame *pl_dataframe_fill_nan(
+    PlFrame *frame, double value, const char *const *columns,
+    uint64_t column_count, char **err);
+PlFrame *pl_dataframe_drop_nans(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    char **err);
 PlFrame *pl_dataframe_unique(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     const char *keep, int32_t maintain_order, char **err);
@@ -789,6 +867,12 @@ int pl_dataframe_write_csv_precise(
     int32_t has_header, const char *null_value,
     const char *line_terminator, const char *quote_style,
     int64_t float_precision, char **err);
+int pl_dataframe_write_csv_complete(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value,
+    const char *line_terminator, const char *quote_style,
+    int64_t float_precision, int32_t include_bom, int32_t decimal_comma,
+    char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
@@ -813,6 +897,13 @@ before `n_rows` applies; a non-zero `decimal_comma` parses a comma as the
 decimal separator while the one-byte delimiter keeps its earlier rules. Both
 default to zero in every earlier reader entry point.
 
+`pl_dataframe_read_csv_empty_policy` is additive and carries every argument from
+`pl_dataframe_read_csv_extended` plus `int32_t raise_if_empty`. A non-zero value
+keeps Polars' default where an empty file with no header is an error; zero
+returns an empty frame instead. The argument affects only the empty-file check,
+so malformed content still fails. Earlier reader entry points keep
+`raise_if_empty` enabled.
+
 `pl_dataframe_reverse` returns a newly owned frame with the same columns and
 reversed row order. `pl_dataframe_cast` borrows `pair_count` `column`, `dtype`
 string pairs (a flat array of `2 * pair_count` names); casting is strict and
@@ -823,10 +914,23 @@ borrows a non-empty list of list-typed columns; `keep_nulls` and
 `empty_as_null` control the null/empty-list rows. All four are additive and
 leave the input handle open.
 
+`pl_dataframe_fill_nan` replaces NaN in Float32/Float64 columns with the finite
+`double value`; a null/zero column count targets every float column, and a
+non-empty list is validated against the frame. `pl_dataframe_drop_nans` filters
+out rows with a NaN in any targeted float column and keeps nulls. Both ignore
+non-float columns in a subset, borrow their name arrays for the call, and
+return a newly owned frame while leaving the input open.
+
 `pl_dataframe_write_csv_precise` is additive and carries every option from
 `pl_dataframe_write_csv_configured` plus `int64_t float_precision`, where `-1`
 keeps Polars' default formatting and non-negative values set the number of
 digits after the decimal point for float columns.
+
+`pl_dataframe_write_csv_complete` is additive and carries every argument from
+`pl_dataframe_write_csv_precise` plus `int32_t include_bom` and `int32_t
+decimal_comma`. A non-zero `include_bom` prepends `EF BB BF`; a non-zero
+`decimal_comma` formats float fields with a comma decimal separator. Both
+default to zero in every earlier writer entry point.
 
 Returned `char *` values and error strings must be freed with
 `pl_string_free`. A null frame pointer indicates an error when `err` is set.
@@ -961,7 +1065,7 @@ failure.
 
 ### LuaRocks source rock
 
-`lua-polars-0.19.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.20.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -970,13 +1074,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.19.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.20.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.19.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.20.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
@@ -1018,11 +1122,14 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV reader row windows (`skip_rows`, `n_rows`).
 - [x] CSV reader positional column renaming and UTF-8 lossy decoding.
 - [x] CSV reader post-header row windows and decimal-comma numbers.
+- [x] CSV reader empty-file handling with `raise_if_empty = false`.
+- [x] DataFrame NaN filling and dropping with column subsets.
 - [x] DataFrame row reversal and strict column casting.
 - [x] Distinct rows with column subsets and keep strategies.
 - [x] List-column explode with null/empty-list controls.
 - [x] CSV writer delimiter, header, and null-value options.
 - [x] CSV writer line terminator (`\n`, `\r\n`).
+- [x] CSV writer UTF-8 BOM and decimal-comma output.
 - [x] Parquet reader column projection and row windows.
 - [x] Parquet writer compression, statistics, and chunk-size options.
 - [x] LuaRocks source-rock packaging.

@@ -26,7 +26,7 @@ end
 
 ## Status
 
-`0.19.0` is an eager-first MVP:
+`0.20.0` is an eager-first MVP:
 
 - CSV, Parquet, and JSON readers and writers
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
@@ -42,13 +42,15 @@ end
   `decimal_comma = true` for comma-decimal numeric fields,
   `try_parse_dates = true` for ISO date/datetime inference,
   `encoding = "utf8-lossy"` for invalid UTF-8 input,
-  `truncate_ragged_lines = true` to truncate rows wider than the header, and
-  `ignore_errors = true` to keep parsable rows when a value cannot be parsed
+  `truncate_ragged_lines = true` to truncate rows wider than the header,
+  `ignore_errors = true` to keep parsable rows when a value cannot be parsed,
+  and `raise_if_empty = false` to read an empty file as an empty frame
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, a literal `null_value` placeholder for null fields, a
   `line_terminator` of `"\n"` or `"\r\n"`, a `quote_style` of
-  `"necessary"`, `"always"`, `"non_numeric"`, or `"never"`, and a
-  non-negative `float_precision` for float columns
+  `"necessary"`, `"always"`, `"non_numeric"`, or `"never"`, a
+  non-negative `float_precision` for float columns, `include_bom = true` for a
+  UTF-8 byte-order mark, and `decimal_comma = true` for comma-decimal floats
 - Parquet reader options: a `columns` name/list projection and a
   `skip_rows`/`n_rows` window that keeps the file schema for empty results
 - Parquet writer options: a `compression` codec (`zstd`, `snappy`, `gzip`,
@@ -67,8 +69,9 @@ end
   `unique([columns, options])` with subsets and first/last/none/any keep
   strategies, and `explode(columns [, options])` for list columns
 - `drop_nulls([columns])` with an optional column subset, `fill_null(value
-  [, columns])` for scalar and column-scoped replacement, `unique()`/
-  `null_count()`, and row iteration helpers
+  [, columns])` for scalar and column-scoped replacement, `fill_nan(value
+  [, columns])`/`drop_nans([columns])` for the separate floating-point NaN
+  state, `unique()`/`null_count()`, and row iteration helpers
 - explicit `:close()` plus Lua GC finalization
 - a LuaRocks source rockspec and a self-contained prefix install
 
@@ -113,8 +116,9 @@ writing, custom CSV delimiters, quote characters, comment prefixes, headerless
 files, read-time column projection, positional column renaming, dtype overrides,
 literal and per-column null markers, UTF-8 lossy decoding,
 skip-rows/row-limit windows, post-header row skipping, decimal-comma numbers,
-CSV date inference and writer quote styles,
-writer delimiter/header/null/line-terminator options,
+CSV date inference and writer quote styles, empty-file reads, NaN fill/drop,
+writer delimiter/header/null/line-terminator options, UTF-8 BOM and
+decimal-comma output,
 Parquet column projections, row windows, compression codecs, statistics and
 chunk-size writer options, JSON array/JSON Lines round-trips, schema, head,
 tail, slice, row indexing, projection, row reversal, strict casting,
@@ -141,17 +145,17 @@ Lua loader also searches the directories on `package.cpath`, so no
 `POLARS_LUA_LIB` is needed.
 
 ```sh
-luarocks make lua-polars-0.19.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.20.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 For a clean checkout the first command compiles Polars; set
 `CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec and
-`scripts/build.sh` default to one job). The source URL points at the `v0.19.0`
+`scripts/build.sh` default to one job). The source URL points at the `v0.20.0`
 tag, which is created as part of the release: use `luarocks make` from a
 checkout before the tag exists, and
-`luarocks build lua-polars-0.19.0-1.rockspec` afterwards. Both use the same
+`luarocks build lua-polars-0.20.0-1.rockspec` afterwards. Both use the same
 build and install commands.
 
 ## Install into a prefix
@@ -196,6 +200,9 @@ polars.read_csv(path, {
 polars.read_csv(path, {
   null_values = { note = "NA", score = "9" },
 })
+polars.read_csv(path, {
+  raise_if_empty = false,
+})
 polars.read_parquet(path)
 polars.read_parquet(path, {
   columns = { "score", "name" },
@@ -219,6 +226,8 @@ df:reverse()
 df:cast({ score = "f64" })
 df:unique("team", { keep = "last" })
 df:explode("tags", { keep_nulls = false })
+df:fill_nan(0, "score")
+df:drop_nans({ "score", "bonus" })
 df:sql(query)
 df:select("a", "b")
 df:filter('"a" > 3')
@@ -238,6 +247,8 @@ df:write_csv("out.tsv", {
 df:write_csv("out-crlf.csv", { line_terminator = "\r\n" })
 df:write_csv("quoted.csv", { quote_style = "always" })
 df:write_csv("rounded.csv", { float_precision = 2 })
+df:write_csv("utf8.csv", { include_bom = true })
+df:write_csv("european.csv", { delimiter = ";", decimal_comma = true })
 df:write_parquet("out.parquet")
 df:write_parquet("out.parquet", {
   compression = "snappy",

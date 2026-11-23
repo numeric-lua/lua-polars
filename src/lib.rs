@@ -59,6 +59,7 @@ struct CsvReadConfig {
     decimal_comma: bool,
     truncate_ragged_lines: bool,
     ignore_errors: bool,
+    raise_if_empty: bool,
 }
 
 impl Default for CsvReadConfig {
@@ -81,6 +82,7 @@ impl Default for CsvReadConfig {
             decimal_comma: false,
             truncate_ragged_lines: false,
             ignore_errors: false,
+            raise_if_empty: true,
         }
     }
 }
@@ -93,6 +95,8 @@ struct CsvWriteConfig {
     line_terminator: String,
     quote_style: QuoteStyle,
     float_precision: Option<usize>,
+    include_bom: bool,
+    decimal_comma: bool,
 }
 
 impl Default for CsvWriteConfig {
@@ -104,6 +108,8 @@ impl Default for CsvWriteConfig {
             line_terminator: "\n".to_string(),
             quote_style: QuoteStyle::Necessary,
             float_precision: None,
+            include_bom: false,
+            decimal_comma: false,
         }
     }
 }
@@ -656,6 +662,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
         .with_columns(columns)
         .with_schema_overwrite(schema_overwrite)
         .with_ignore_errors(config.ignore_errors)
+        .with_raise_if_empty(config.raise_if_empty)
         .map_parse_options(|options| {
             options
                 .with_separator(config.delimiter)
@@ -1495,6 +1502,76 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_extended(
     finish_frame(result, err)
 }
 
+/// Reads a CSV file with every earlier reader option plus empty-file handling.
+///
+/// The arguments match [`pl_dataframe_read_csv_extended`] and keep the same
+/// meaning and defaults. `raise_if_empty` is non-zero to keep Polars' default
+/// behavior where an empty file with no header is an error; zero allows that
+/// read and returns an empty frame. A file with a header but no data rows is
+/// not considered empty by Polars, so it keeps its header-derived schema in
+/// either mode. This entry point is additive; every earlier reader signature
+/// and default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_empty_policy(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    null_columns: *const *const c_char,
+    named_null_values: *const *const c_char,
+    named_null_value_count: u64,
+    skip_rows: u64,
+    skip_rows_after_header: u64,
+    n_rows: i64,
+    rename_columns: *const *const c_char,
+    rename_column_count: u64,
+    encoding: *const c_char,
+    try_parse_dates: i32,
+    decimal_comma: i32,
+    truncate_ragged_lines: i32,
+    ignore_errors: i32,
+    raise_if_empty: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
+            skip_rows,
+            n_rows,
+        )?;
+        config.skip_rows_after_header = usize::try_from(skip_rows_after_header)
+            .map_err(|_| "CSV skip_rows_after_header is too large for this platform".to_string())?;
+        config.encoding = read_csv_encoding(encoding)?;
+        config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
+        config.named_null_values =
+            read_csv_named_null_values(null_columns, named_null_values, named_null_value_count)?;
+        config.try_parse_dates = try_parse_dates != 0;
+        config.decimal_comma = decimal_comma != 0;
+        config.truncate_ragged_lines = truncate_ragged_lines != 0;
+        config.ignore_errors = ignore_errors != 0;
+        config.raise_if_empty = raise_if_empty != 0;
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_parquet(
     path: *const c_char,
@@ -1907,6 +1984,132 @@ pub unsafe extern "C" fn pl_dataframe_cast(
     finish_frame(result, err)
 }
 
+/// Resolves the float columns a NaN operation should touch.
+///
+/// A requested list is validated against the frame; entries that are not
+/// Float32/Float64 are ignored because only float columns can contain NaN.
+/// An empty request means every float column. The returned names keep frame
+/// order for the all-column case and request order for an explicit subset.
+fn nan_target_columns(
+    df: &DataFrame,
+    requested: &[String],
+    operation: &str,
+) -> Result<Vec<String>, String> {
+    let is_float = |column: &Column| {
+        matches!(column.dtype(), DataType::Float32 | DataType::Float64)
+    };
+    if requested.is_empty() {
+        return Ok(df
+            .columns()
+            .iter()
+            .filter(|column| is_float(column))
+            .map(|column| column.name().to_string())
+            .collect());
+    }
+    let mut names = Vec::new();
+    for name in requested {
+        let column = df.column(name.as_str()).map_err(|_| {
+            format!("{operation} column '{name}' is not a column in the DataFrame")
+        })?;
+        if is_float(column) {
+            names.push(name.clone());
+        }
+    }
+    Ok(names)
+}
+
+/// Replaces NaN values in float columns with a finite scalar.
+///
+/// A null/zero `columns` count targets every Float32/Float64 column; otherwise
+/// the named columns are checked against the frame and non-float columns are
+/// left unchanged. Nulls are preserved because only NaN values match the
+/// replacement predicate. `value` must be finite. The input frame is unchanged
+/// and the result keeps its column order. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_fill_nan(
+    ptr: *mut PlFrame,
+    value: f64,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        if !value.is_finite() {
+            return Err("fill_nan value must be finite".to_string());
+        }
+        let requested = read_name_list(columns, column_count, "fill_nan columns")?;
+        let names = nan_target_columns(&frame.df, &requested, "fill_nan")?;
+        if names.is_empty() {
+            return Ok(frame.df.clone());
+        }
+        let mut expressions = Vec::with_capacity(names.len());
+        for name in &names {
+            let dtype = frame
+                .df
+                .column(name.as_str())
+                .map_err(|error| error.to_string())?
+                .dtype()
+                .clone();
+            expressions.push(
+                when(col(name.as_str()).is_nan())
+                    .then(lit(value).cast(dtype))
+                    .otherwise(col(name.as_str()))
+                    .alias(name.as_str()),
+            );
+        }
+        frame
+            .df
+            .clone()
+            .lazy()
+            .with_columns(expressions)
+            .collect()
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
+/// Drops rows containing a NaN in any targeted float column.
+///
+/// A null/zero `columns` count targets every Float32/Float64 column; otherwise
+/// the named columns are checked against the frame and non-float columns are
+/// ignored. Null values are kept: a row is removed only for a NaN, not for a
+/// null. The input frame is unchanged and the result keeps its column order.
+/// This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_drop_nans(
+    ptr: *mut PlFrame,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let requested = read_name_list(columns, column_count, "drop_nans columns")?;
+        let names = nan_target_columns(&frame.df, &requested, "drop_nans")?;
+        if names.is_empty() {
+            return Ok(frame.df.clone());
+        }
+        let mut predicate: Option<Expr> = None;
+        for name in &names {
+            let column = col(name.as_str());
+            let not_nan = column.clone().is_not_nan().or(column.is_null());
+            predicate = Some(match predicate {
+                Some(current) => current.and(not_nan),
+                None => not_nan,
+            });
+        }
+        frame
+            .df
+            .clone()
+            .lazy()
+            .filter(predicate.expect("at least one NaN column"))
+            .collect()
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 /// Parses a `unique` keep strategy from the C ABI.
 fn parse_unique_keep(value: Option<&str>) -> Result<UniqueKeepStrategy, String> {
     match value.unwrap_or("first").to_ascii_lowercase().as_str() {
@@ -2136,10 +2339,12 @@ fn write_csv_frame(df: &DataFrame, path: &str, config: CsvWriteConfig) -> Result
     let mut df = df.clone();
     let mut writer = CsvWriter::new(file)
         .include_header(config.include_header)
+        .include_bom(config.include_bom)
         .with_separator(config.delimiter)
         .with_line_terminator(PlSmallStr::from_str(&config.line_terminator))
         .with_quote_style(config.quote_style)
-        .with_float_precision(config.float_precision);
+        .with_float_precision(config.float_precision)
+        .with_decimal_comma(config.decimal_comma);
     if let Some(null_value) = config.null_value {
         writer = writer.with_null_value(PlSmallStr::from_str(&null_value));
     }
@@ -2250,6 +2455,8 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_full(
             line_terminator: read_csv_line_terminator(line_terminator)?,
             quote_style: QuoteStyle::Necessary,
             float_precision: None,
+            include_bom: false,
+            decimal_comma: false,
         };
         write_csv_frame(&frame.df, &path, config)
     }));
@@ -2293,10 +2500,30 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_configured(
             line_terminator: read_csv_line_terminator(line_terminator)?,
             quote_style: parse_csv_quote_style(quote_style_name.as_deref())?,
             float_precision: None,
+            include_bom: false,
+            decimal_comma: false,
         };
         write_csv_frame(&frame.df, &path, config)
     }));
     finish_write(result, err)
+}
+
+/// Converts the writer's `float_precision` ABI value.
+///
+/// `-1` keeps Polars' default shortest representation; other negative values
+/// are errors, and non-negative values are the digits after the decimal point.
+fn parse_csv_float_precision(value: i64) -> Result<Option<usize>, String> {
+    if value == -1 {
+        return Ok(None);
+    }
+    if value < 0 {
+        return Err(format!(
+            "CSV float_precision must be -1 for the default or a non-negative count, got {value}"
+        ));
+    }
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| "CSV float_precision is too large for this platform".to_string())
 }
 
 /// Writes a CSV file with every earlier writer option plus float precision.
@@ -2328,17 +2555,53 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_precise(
         } else {
             Some(read_utf8(quote_style, "quote_style")?)
         };
-        let float_precision = if float_precision == -1 {
+        let config = CsvWriteConfig {
+            delimiter,
+            include_header: has_header != 0,
+            null_value: read_csv_null_value(null_value, delimiter)?,
+            line_terminator: read_csv_line_terminator(line_terminator)?,
+            quote_style: parse_csv_quote_style(quote_style_name.as_deref())?,
+            float_precision: parse_csv_float_precision(float_precision)?,
+            include_bom: false,
+            decimal_comma: false,
+        };
+        write_csv_frame(&frame.df, &path, config)
+    }));
+    finish_write(result, err)
+}
+
+/// Writes a CSV file with every earlier writer option plus BOM and decimal
+/// controls.
+///
+/// The delimiter, header, null-value, line-terminator, quote-style, and
+/// float-precision arguments have the same meaning as in
+/// [`pl_dataframe_write_csv_precise`]. `include_bom` is non-zero to prepend a
+/// UTF-8 byte-order mark (`EF BB BF`) to the file. `decimal_comma` is non-zero
+/// to serialize float fields with a comma decimal separator, which is intended
+/// with a semicolon or tab delimiter. Both default to zero in every earlier
+/// writer entry point. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_csv_complete(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    null_value: *const c_char,
+    line_terminator: *const c_char,
+    quote_style: *const c_char,
+    float_precision: i64,
+    include_bom: i32,
+    decimal_comma: i32,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let delimiter = read_delimiter(delimiter)?;
+        let quote_style_name = if quote_style.is_null() {
             None
-        } else if float_precision < 0 {
-            return Err(format!(
-                "CSV float_precision must be -1 for the default or a non-negative count, got {float_precision}"
-            ));
         } else {
-            Some(
-                usize::try_from(float_precision)
-                    .map_err(|_| "CSV float_precision is too large for this platform".to_string())?,
-            )
+            Some(read_utf8(quote_style, "quote_style")?)
         };
         let config = CsvWriteConfig {
             delimiter,
@@ -2346,7 +2609,9 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_precise(
             null_value: read_csv_null_value(null_value, delimiter)?,
             line_terminator: read_csv_line_terminator(line_terminator)?,
             quote_style: parse_csv_quote_style(quote_style_name.as_deref())?,
-            float_precision,
+            float_precision: parse_csv_float_precision(float_precision)?,
+            include_bom: include_bom != 0,
+            decimal_comma: decimal_comma != 0,
         };
         write_csv_frame(&frame.df, &path, config)
     }));

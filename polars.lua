@@ -102,6 +102,19 @@ PlFrame *pl_dataframe_read_csv_extended(
     const char *encoding, int32_t try_parse_dates,
     int32_t decimal_comma, int32_t truncate_ragged_lines,
     int32_t ignore_errors, char **err);
+PlFrame *pl_dataframe_read_csv_empty_policy(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, uint64_t skip_rows_after_header, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t decimal_comma, int32_t truncate_ragged_lines,
+    int32_t ignore_errors, int32_t raise_if_empty, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -122,6 +135,12 @@ PlFrame *pl_dataframe_with_row_index(
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_cast(
     PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
+PlFrame *pl_dataframe_fill_nan(
+    PlFrame *frame, double value, const char *const *columns,
+    uint64_t column_count, char **err);
+PlFrame *pl_dataframe_drop_nans(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    char **err);
 PlFrame *pl_dataframe_unique(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     const char *keep, int32_t maintain_order, char **err);
@@ -151,6 +170,12 @@ int pl_dataframe_write_csv_precise(
     int32_t has_header, const char *null_value,
     const char *line_terminator, const char *quote_style,
     int64_t float_precision, char **err);
+int pl_dataframe_write_csv_complete(
+    PlFrame *frame, const char *path, const char *delimiter,
+    int32_t has_header, const char *null_value,
+    const char *line_terminator, const char *quote_style,
+    int64_t float_precision, int32_t include_bom, int32_t decimal_comma,
+    char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
@@ -474,6 +499,8 @@ local WRITE_CSV_OPTION_KEYS = {
   line_terminator = true,
   quote_style = true,
   float_precision = true,
+  include_bom = true,
+  decimal_comma = true,
 }
 
 local CSV_QUOTE_STYLES = {
@@ -554,6 +581,19 @@ local function write_csv_float_precision(value)
   return value
 end
 
+-- Both new writer flags default to false, so an absent option keeps the
+-- earlier writer path and output exactly as before.
+local function write_csv_boolean_option(options, key)
+  local value = options[key]
+  if value == nil then
+    return false
+  end
+  if type(value) ~= "boolean" then
+    error("write_csv " .. key .. " must be a boolean", 3)
+  end
+  return value
+end
+
 local function write_csv_options(options)
   if type(options) ~= "table" then
     error("write_csv options must be a table", 3)
@@ -584,7 +624,9 @@ local function write_csv_options(options)
   return delimiter, header,
     write_csv_null_value(options.null_value, delimiter), line_terminator,
     write_csv_quote_style(options.quote_style),
-    write_csv_float_precision(options.float_precision)
+    write_csv_float_precision(options.float_precision),
+    write_csv_boolean_option(options, "include_bom"),
+    write_csv_boolean_option(options, "decimal_comma")
 end
 
 local function quote_identifier(name)
@@ -951,6 +993,58 @@ function DataFrame:fill_null(value, columns)
   return self:sql("SELECT " .. table.concat(projections, ", ") .. " FROM df")
 end
 
+-- NaN is distinct from null: a CSV null or a SQL NULL is left alone, while a
+-- floating-point NaN is replaced. Only Float32/Float64 columns can carry NaN;
+-- a selected non-float column is simply unchanged.
+local function fill_nan_value(value)
+  if type(value) ~= "number" or value ~= value or value == math.huge or
+      value == -math.huge then
+    error("fill_nan value must be a finite number", 3)
+  end
+  return value
+end
+
+-- With no columns every float column is filled. A name or contiguous list
+-- limits the replacement to those columns and validates them against the live
+-- frame; non-float columns in the subset are ignored.
+function DataFrame:fill_nan(value, columns)
+  value = fill_nan_value(value)
+  local selected = subset_columns(self, columns, "fill_nan")
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_fill_nan(self:_require_open(), value, names,
+    count, err)
+  return new_frame(pointer, err)
+end
+
+-- Drops rows that contain a NaN in any targeted float column. Nulls are kept
+-- because they are a separate missing-value state. With no columns every float
+-- column participates; a name or contiguous list limits the check.
+function DataFrame:drop_nans(columns)
+  local selected = subset_columns(self, columns, "drop_nans")
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_drop_nans(self:_require_open(), names, count,
+    err)
+  return new_frame(pointer, err)
+end
+
 local VALUE_COUNT_OPTION_KEYS = {
   sort = true,
   name = true,
@@ -1030,10 +1124,15 @@ function DataFrame:write_csv(path, options)
     error("write_csv path must be a string", 2)
   end
   local delimiter, header, null_value, line_terminator, quote_style,
-    float_precision = write_csv_options(options)
+    float_precision, include_bom, decimal_comma = write_csv_options(options)
   local err = ffi.new("char *[1]")
   local status
-  if float_precision ~= nil then
+  if include_bom or decimal_comma then
+    status = lib.pl_dataframe_write_csv_complete(self:_require_open(), path,
+      delimiter, header and 1 or 0, null_value, line_terminator,
+      quote_style or "necessary", float_precision or -1,
+      include_bom and 1 or 0, decimal_comma and 1 or 0, err)
+  elseif float_precision ~= nil then
     status = lib.pl_dataframe_write_csv_precise(self:_require_open(), path,
       delimiter, header and 1 or 0, null_value, line_terminator,
       quote_style or "necessary", float_precision, err)
@@ -1306,7 +1405,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.19.0",
+  _VERSION = "0.20.0",
   null = json.null,
   DataFrame = DataFrame,
 }
@@ -1332,6 +1431,7 @@ local CSV_OPTION_KEYS = {
   decimal_comma = true,
   truncate_ragged_lines = true,
   ignore_errors = true,
+  raise_if_empty = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -1644,10 +1744,23 @@ local function csv_boolean_option(options, key)
   return value
 end
 
+-- Polars raises on an empty file with no header by default. The opt-out is
+-- explicit because silently returning an empty frame can hide a bad path.
+local function csv_raise_if_empty(options)
+  local value = options.raise_if_empty
+  if value == nil then
+    return true
+  end
+  if type(value) ~= "boolean" then
+    error("read_csv raise_if_empty must be a boolean", 3)
+  end
+  return value
+end
+
 local function csv_options(options)
   if options == nil then
     return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil,
-      nil, nil, false, false, false, 0, false
+      nil, nil, false, false, false, 0, false, true
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -1682,11 +1795,12 @@ local function csv_options(options)
   local ignore_errors = csv_boolean_option(options, "ignore_errors")
   local skip_rows_after_header = csv_skip_rows_after_header(options)
   local decimal_comma = csv_boolean_option(options, "decimal_comma")
+  local raise_if_empty = csv_raise_if_empty(options)
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
     try_parse_dates, truncate_ragged_lines, ignore_errors,
-    skip_rows_after_header, decimal_comma
+    skip_rows_after_header, decimal_comma, raise_if_empty
 end
 
 function polars.read_csv(path, options)
@@ -1697,7 +1811,7 @@ function polars.read_csv(path, options)
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
     try_parse_dates, truncate_ragged_lines, ignore_errors,
-    skip_rows_after_header, decimal_comma = csv_options(options)
+    skip_rows_after_header, decimal_comma, raise_if_empty = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -1738,7 +1852,17 @@ function polars.read_csv(path, options)
     end
   end
   local pointer
-  if skip_rows_after_header > 0 or decimal_comma then
+  if not raise_if_empty then
+    pointer = lib.pl_dataframe_read_csv_empty_policy(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, named_columns,
+      named_markers, named_null_columns and #named_null_columns or 0,
+      skip_rows, skip_rows_after_header, n_rows, renames,
+      rename_columns and #rename_columns or 0, encoding,
+      try_parse_dates and 1 or 0, decimal_comma and 1 or 0,
+      truncate_ragged_lines and 1 or 0, ignore_errors and 1 or 0,
+      0, err)
+  elseif skip_rows_after_header > 0 or decimal_comma then
     pointer = lib.pl_dataframe_read_csv_extended(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, markers, null_value_count, named_columns,

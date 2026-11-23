@@ -85,10 +85,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.19.0")
+  eq(polars.version(), "0.20.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.19.0")
+  eq(polars._VERSION, "0.20.0")
 end)
 
 current = "csv"
@@ -2679,6 +2679,340 @@ test("read_csv rejects invalid extended dialect options", function()
     truthy(tostring(err):find(case[2], 1, true),
       "expected '" .. case[2] .. "' in: " .. tostring(err))
   end
+end)
+
+test("fill_nan replaces NaN values and preserves nulls", function()
+  local source = polars.read_csv(fixture)
+  local df = source:sql([[
+    SELECT "score",
+           CASE WHEN "score" = 7 THEN NULL
+                WHEN "score" = 10 THEN 0.0 / 0.0
+                ELSE CAST("score" AS DOUBLE) END AS "x"
+    FROM df
+  ]])
+  local filled = df:fill_nan(2.5)
+  eq(filled:schema().x, "f64")
+  eq(table.concat(filled:columns(), ","), "score,x")
+  local rows = filled:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[1].x, 2.5)
+  eq(rows[2].score, 7)
+  eq(rows[2].x, polars.null)
+  eq(rows[3].x, 12)
+  local out = new_temp_path(".csv")
+  df:write_csv(out)
+  truthy(read_file(out):find(",NaN\n", 1, true),
+    "fill_nan changed the input frame")
+  filled:close()
+  df:close()
+  source:close()
+end)
+
+test("fill_nan scopes columns and rejects invalid values", function()
+  local source = polars.read_csv(fixture)
+  local df = source:sql([[
+    SELECT "score",
+           CASE WHEN "score" = 10 THEN 0.0 / 0.0
+                ELSE CAST("score" AS DOUBLE) END AS "x",
+           CASE WHEN "score" = 10 THEN 0.0 / 0.0
+                ELSE CAST("score" AS DOUBLE) END AS "y"
+    FROM df
+  ]])
+  local filled = df:fill_nan(3, "x")
+  local out = new_temp_path(".csv")
+  filled:write_csv(out)
+  local raw = read_file(out)
+  local x_value, y_value = raw:match("\n10,([^,\n]+),([^\n]+)")
+  truthy(x_value ~= nil, "missing first data row in fill_nan output")
+  eq(tonumber(x_value), 3)
+  eq(y_value, "NaN", "unselected column changed")
+
+  local untouched = df:fill_nan(1, "score")
+  eq(untouched:to_table()[1].score, 10, "non-float column changed")
+  untouched:close()
+
+  local text_only = source:sql('SELECT "name", "team" FROM df')
+  local unchanged = text_only:fill_nan(1)
+  eq(unchanged:shape(), text_only:shape())
+  eq(table.concat(unchanged:columns(), ","), "name,team")
+  unchanged:close()
+  text_only:close()
+
+  local value_cases = {
+    { "2", "finite number" },
+    { 0 / 0, "finite number" },
+    { math.huge, "finite number" },
+    { -math.huge, "finite number" },
+    { true, "finite number" },
+    { {}, "finite number" },
+  }
+  for _, case in ipairs(value_cases) do
+    local ok, err = pcall(function() df:fill_nan(case[1]) end)
+    eq(ok, false, "invalid fill_nan value accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local subset_cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "score", [3] = "x" }, "contiguous list" },
+    { { "score", "score" }, "duplicate fill_nan column 'score'" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(subset_cases) do
+    local ok, err = pcall(function() df:fill_nan(0, case[1]) end)
+    eq(ok, false, "invalid fill_nan subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  filled:close()
+  df:close()
+  source:close()
+  local ok, err = pcall(function() df:fill_nan(0) end)
+  eq(ok, false, "closed fill_nan accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed fill_nan error")
+end)
+
+test("drop_nans removes NaN rows and keeps nulls", function()
+  local source = polars.read_csv(fixture)
+  local df = source:sql([[
+    SELECT "score",
+           CASE WHEN "score" = 7 THEN NULL
+                WHEN "score" = 10 THEN 0.0 / 0.0
+                ELSE CAST("score" AS DOUBLE) END AS "x"
+    FROM df
+  ]])
+  local dropped = df:drop_nans()
+  eq(dropped:shape(), 4)
+  eq(dropped:schema().x, "f64")
+  local rows = dropped:to_table()
+  eq(rows[1].score, 7)
+  eq(rows[1].x, polars.null, "null row was dropped")
+  eq(rows[2].score, 12)
+  dropped:close()
+
+  local pair = source:sql([[
+    SELECT "score",
+           CASE WHEN "score" = 10 THEN 0.0 / 0.0
+                ELSE CAST("score" AS DOUBLE) END AS "x",
+           CASE WHEN "score" = 7 THEN 0.0 / 0.0
+                ELSE CAST("score" AS DOUBLE) END AS "y"
+    FROM df
+  ]])
+  local by_x = pair:drop_nans("x")
+  eq(by_x:shape(), 4)
+  eq(by_x:to_table()[1].score, 7,
+    "subset should ignore NaN in an unselected column")
+  by_x:close()
+
+  local both = pair:drop_nans({ "x", "y" })
+  eq(both:shape(), 3)
+  eq(both:to_table()[1].score, 12)
+  both:close()
+
+  local by_score = pair:drop_nans("score")
+  eq(by_score:shape(), 5, "non-float subset should keep every row")
+  by_score:close()
+
+  local text_only = source:sql('SELECT "name", "team" FROM df')
+  local unchanged = text_only:drop_nans()
+  eq(unchanged:shape(), text_only:shape())
+  unchanged:close()
+  text_only:close()
+  pair:close()
+  df:close()
+  source:close()
+end)
+
+test("drop_nans rejects invalid subsets", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { true, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "name", [3] = "score" }, "contiguous list" },
+    { { "" }, "entries must be non-empty strings" },
+    { { 42 }, "entries must be non-empty strings" },
+    { { "name", "name" }, "duplicate drop_nans column 'name'" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:drop_nans(case[1]) end)
+    eq(ok, false, "invalid drop_nans subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:drop_nans() end)
+  eq(ok, false, "closed drop_nans accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed drop_nans error")
+end)
+
+test("read_csv raise_if_empty allows an empty file", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:close()
+
+  local ok, err = pcall(polars.read_csv, path)
+  eq(ok, false, "empty CSV accepted by default")
+  truthy(tostring(err):lower():find("empty", 1, true),
+    "empty CSV error: " .. tostring(err))
+
+  local df = polars.read_csv(path, { raise_if_empty = false })
+  eq(df:shape(), 0)
+  eq(#df:columns(), 0)
+  df:close()
+
+  local custom = polars.read_csv(path, {
+    raise_if_empty = false,
+    delimiter = ";",
+  })
+  eq(custom:shape(), 0)
+  custom:close()
+
+  local header_path = new_temp_path(".csv")
+  local header_file = assert(io.open(header_path, "w"))
+  header_file:write("id,name\n")
+  header_file:close()
+  local headed = polars.read_csv(header_path, { raise_if_empty = false })
+  eq(headed:shape(), 0)
+  eq(table.concat(headed:columns(), ","), "id,name")
+  headed:close()
+
+  ok, err = pcall(polars.read_csv, path, { raise_if_empty = true })
+  eq(ok, false, "explicit raise_if_empty = true accepted an empty file")
+  truthy(tostring(err):lower():find("empty", 1, true),
+    "explicit empty CSV error: " .. tostring(err))
+end)
+
+test("read_csv raise_if_empty rejects non-booleans and keeps parse errors", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("a,b\n1,2\n3,4,5\n")
+  file:close()
+  for _, value in ipairs({ 1, 0, "false", {}, function() end }) do
+    local ok, err = pcall(polars.read_csv, path, { raise_if_empty = value })
+    eq(ok, false, "invalid raise_if_empty accepted")
+    truthy(tostring(err):find("raise_if_empty", 1, true),
+      "raise_if_empty option name: " .. tostring(err))
+    truthy(tostring(err):find("boolean", 1, true),
+      "raise_if_empty boolean guidance: " .. tostring(err))
+  end
+  local ok, err = pcall(polars.read_csv, path, { raise_if_empty = false })
+  eq(ok, false, "malformed CSV accepted with raise_if_empty = false")
+  truthy(tostring(err):find("fields", 1, true) or
+    tostring(err):find("CSV", 1, true), "malformed CSV error: " .. tostring(err))
+end)
+
+test("CSV writer include_bom writes and reads a UTF-8 BOM", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  eq(df:write_csv(out, { include_bom = true }), df,
+    "include_bom return value")
+  local raw = read_file(out)
+  eq(raw:sub(1, 3), "\239\187\191", "UTF-8 BOM")
+  truthy(raw:find("\239\187\191id,name,note\n", 1, true), "BOM header")
+  local loaded = polars.read_csv(out)
+  check_roundtrip_frame(loaded)
+  loaded:close()
+
+  df:write_csv(out, {
+    include_bom = true,
+    delimiter = ";",
+    header = false,
+    null_value = "NA",
+  })
+  raw = read_file(out)
+  eq(raw:sub(1, 3), "\239\187\191", "combined UTF-8 BOM")
+  truthy(raw:find("1;ana;hello, world\n", 1, true),
+    "BOM headerless record")
+  truthy(raw:find("3;caio;NA\n", 1, true), "BOM combined null placeholder")
+  loaded = polars.read_csv(out, { delimiter = ";", header = false })
+  eq(loaded:shape(), 3)
+  eq(loaded:to_table()[1].column_2, "ana")
+  loaded:close()
+
+  df:write_csv(out, {})
+  truthy(read_file(out):sub(1, 3) ~= "\239\187\191",
+    "default CSV output should not have a BOM")
+  df:close()
+end)
+
+test("CSV writer decimal_comma writes comma decimals and round-trips", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id;price\n1;1.5\n2;2.25\n3;3\n")
+  file:close()
+  local df = polars.read_csv(path, { delimiter = ";" })
+  eq(df:schema().price, "f64")
+  local out = new_temp_path(".csv")
+
+  eq(df:write_csv(out, {
+    delimiter = ";",
+    decimal_comma = true,
+  }), df, "decimal_comma return value")
+  local raw = read_file(out)
+  truthy(raw:find("id;price\n", 1, true), "decimal_comma header")
+  truthy(raw:find("1;1,5\n", 1, true), "comma decimal first row")
+  truthy(raw:find("2;2,25\n", 1, true), "comma decimal second row")
+  local loaded = polars.read_csv(out, {
+    delimiter = ";",
+    decimal_comma = true,
+  })
+  eq(loaded:schema().price, "f64")
+  local rows = loaded:to_table()
+  eq(rows[1].price, 1.5)
+  eq(rows[2].price, 2.25)
+  eq(rows[3].price, 3)
+  loaded:close()
+
+  df:write_csv(out, { delimiter = ";" })
+  raw = read_file(out)
+  truthy(raw:find("1;1.5\n", 1, true), "default decimal separator")
+  truthy(not raw:find("1;1,5\n", 1, true),
+    "decimal_comma leaked into the default writer")
+
+  df:write_csv(out, {
+    delimiter = ";",
+    header = false,
+    decimal_comma = true,
+    float_precision = 1,
+  })
+  raw = read_file(out)
+  truthy(raw:find("1;1,5\n", 1, true),
+    "decimal_comma combined with header and precision")
+  loaded = polars.read_csv(out, {
+    delimiter = ";",
+    header = false,
+    decimal_comma = true,
+    rename_columns = { "id", "price" },
+  })
+  eq(loaded:to_table()[1].price, 1.5)
+  loaded:close()
+  df:close()
+end)
+
+test("CSV writer BOM and decimal options reject non-booleans", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".csv")
+  for _, key in ipairs({ "include_bom", "decimal_comma" }) do
+    for _, value in ipairs({ 1, 0, "true", {}, function() end }) do
+      local ok, err = pcall(function()
+        df:write_csv(out, { [key] = value })
+      end)
+      eq(ok, false, key .. " accepted a non-boolean value")
+      truthy(tostring(err):find(key, 1, true),
+        "expected option name in: " .. tostring(err))
+      truthy(tostring(err):find("boolean", 1, true),
+        "expected boolean guidance in: " .. tostring(err))
+    end
+  end
+  df:close()
+  local ok, err = pcall(function()
+    df:write_csv(out, { include_bom = true })
+  end)
+  eq(ok, false, "closed include_bom accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed include_bom error")
 end)
 
 cleanup_temp_files()
