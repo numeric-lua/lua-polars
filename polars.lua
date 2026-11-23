@@ -89,6 +89,19 @@ PlFrame *pl_dataframe_read_csv_lenient(
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, int32_t try_parse_dates,
     int32_t truncate_ragged_lines, int32_t ignore_errors, char **err);
+PlFrame *pl_dataframe_read_csv_extended(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, uint64_t skip_rows_after_header, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t decimal_comma, int32_t truncate_ragged_lines,
+    int32_t ignore_errors, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -106,6 +119,15 @@ PlFrame *pl_dataframe_slice(
     PlFrame *frame, int64_t offset, uint64_t length, char **err);
 PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
+PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_cast(
+    PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
+PlFrame *pl_dataframe_unique(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    const char *keep, int32_t maintain_order, char **err);
+PlFrame *pl_dataframe_explode(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    int32_t keep_nulls, int32_t empty_as_null, char **err);
 PlFrame *pl_dataframe_join(
     PlFrame *left, PlFrame *right, const char *how,
     const char *const *left_on, uint64_t left_count,
@@ -334,6 +356,48 @@ function DataFrame:with_row_index(name, offset)
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_with_row_index(self:_require_open(), name,
     offset, err)
+  return new_frame(pointer, err)
+end
+
+-- Reverses the row order while preserving the column order, names, dtypes,
+-- and nulls. The input frame is unchanged.
+function DataFrame:reverse()
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_reverse(self:_require_open(), err)
+  return new_frame(pointer, err)
+end
+
+-- `mapping` maps a column name to a supported dtype name. Casting is strict,
+-- so a value that cannot be converted fails the whole operation instead of
+-- producing a null. The input frame is unchanged.
+function DataFrame:cast(mapping)
+  if type(mapping) ~= "table" then
+    error("cast expects a table of column = dtype pairs", 2)
+  end
+  local entries = {}
+  for column, dtype in pairs(mapping) do
+    if type(column) ~= "string" or column == "" then
+      error("cast keys must be non-empty column names", 2)
+    end
+    if type(dtype) ~= "string" or dtype == "" then
+      error("cast dtypes must be non-empty dtype names", 2)
+    end
+    entries[#entries + 1] = { column, dtype }
+  end
+  if #entries == 0 then
+    error("cast requires at least one column", 2)
+  end
+  table.sort(entries, function(left, right)
+    return left[1] < right[1]
+  end)
+  local flat = ffi.new("const char *[?]", #entries * 2)
+  for index, entry in ipairs(entries) do
+    flat[(index - 1) * 2] = entry[1]
+    flat[(index - 1) * 2 + 1] = entry[2]
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_cast(self:_require_open(), flat, #entries,
+    err)
   return new_frame(pointer, err)
 end
 
@@ -622,10 +686,6 @@ local function json_format(value, label)
   return canonical
 end
 
-function DataFrame:unique()
-  return self:sql("SELECT DISTINCT * FROM df")
-end
-
 function DataFrame:null_count()
   local counts = {}
   for _, name in ipairs(self:columns()) do
@@ -693,6 +753,128 @@ local function subset_columns(frame, value, label)
     result[index] = name
   end
   return result
+end
+
+local UNIQUE_OPTION_KEYS = {
+  keep = true,
+  maintain_order = true,
+}
+
+local UNIQUE_KEEP = {
+  first = "first",
+  last = "last",
+  none = "none",
+  any = "any",
+}
+
+-- `keep` describes which row survives when a subset repeats, and
+-- `maintain_order` defaults to true so first-seen order is stable.
+local function unique_options(options)
+  if options == nil then
+    return "first", true
+  end
+  if type(options) ~= "table" then
+    error("unique options must be a table", 3)
+  end
+  for key in pairs(options) do
+    if not UNIQUE_OPTION_KEYS[key] then
+      error("unique options: unknown field '" .. tostring(key) .. "'", 3)
+    end
+  end
+  local keep = options.keep
+  if keep == nil then
+    keep = "first"
+  end
+  if type(keep) ~= "string" or keep == "" then
+    error("unique keep must be a non-empty string", 3)
+  end
+  local canonical = UNIQUE_KEEP[keep:lower()]
+  if canonical == nil then
+    error("unique keep must be one of first, last, none, or any", 3)
+  end
+  local maintain_order = options.maintain_order
+  if maintain_order == nil then
+    maintain_order = true
+  end
+  if type(maintain_order) ~= "boolean" then
+    error("unique maintain_order must be a boolean", 3)
+  end
+  return canonical, maintain_order
+end
+
+-- Without a column argument every column participates, matching the earlier
+-- `unique()` behavior. A name or contiguous list compares only those columns.
+-- `keep` can keep the first or last duplicate or drop every duplicate row.
+function DataFrame:unique(columns, options)
+  local selected = subset_columns(self, columns, "unique")
+  local keep, maintain_order = unique_options(options)
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_unique(self:_require_open(), names, count,
+    keep, maintain_order and 1 or 0, err)
+  return new_frame(pointer, err)
+end
+
+local EXPLODE_OPTION_KEYS = {
+  keep_nulls = true,
+  empty_as_null = true,
+}
+
+-- Null lists and empty lists each become one null row by default; callers can
+-- drop either class by turning the matching flag off.
+local function explode_options(options)
+  if options == nil then
+    return true, true
+  end
+  if type(options) ~= "table" then
+    error("explode options must be a table", 3)
+  end
+  for key in pairs(options) do
+    if not EXPLODE_OPTION_KEYS[key] then
+      error("explode options: unknown field '" .. tostring(key) .. "'", 3)
+    end
+  end
+  local keep_nulls = options.keep_nulls
+  if keep_nulls == nil then
+    keep_nulls = true
+  end
+  if type(keep_nulls) ~= "boolean" then
+    error("explode keep_nulls must be a boolean", 3)
+  end
+  local empty_as_null = options.empty_as_null
+  if empty_as_null == nil then
+    empty_as_null = true
+  end
+  if type(empty_as_null) ~= "boolean" then
+    error("explode empty_as_null must be a boolean", 3)
+  end
+  return keep_nulls, empty_as_null
+end
+
+-- Flattens list columns into one row per element, repeating the other
+-- columns. Every named column must exist and have a list dtype.
+function DataFrame:explode(columns, options)
+  local selected = subset_columns(self, columns, "explode")
+  if selected == nil then
+    error("explode columns must be a column name or a list of names", 2)
+  end
+  local keep_nulls, empty_as_null = explode_options(options)
+  local names = ffi.new("const char *[?]", #selected)
+  for index, name in ipairs(selected) do
+    names[index - 1] = name
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_explode(self:_require_open(), names,
+    #selected, keep_nulls and 1 or 0, empty_as_null and 1 or 0, err)
+  return new_frame(pointer, err)
 end
 
 -- With no argument every column participates, matching the earlier behavior.
@@ -1124,7 +1306,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.18.0",
+  _VERSION = "0.19.0",
   null = json.null,
   DataFrame = DataFrame,
 }
@@ -1143,9 +1325,11 @@ local CSV_OPTION_KEYS = {
   dtypes = true,
   null_values = true,
   skip_rows = true,
+  skip_rows_after_header = true,
   n_rows = true,
   encoding = true,
   try_parse_dates = true,
+  decimal_comma = true,
   truncate_ragged_lines = true,
   ignore_errors = true,
 }
@@ -1433,6 +1617,20 @@ local function csv_try_parse_dates(value)
   return value
 end
 
+-- Rows after the header are skipped by Polars before n_rows limits the read,
+-- so the offset and limit compose without touching the header schema.
+local function csv_skip_rows_after_header(options)
+  local value = options.skip_rows_after_header
+  if value == nil then
+    return 0
+  end
+  if type(value) ~= "number" or value < 0 or value % 1 ~= 0 or
+      value > MAX_SAFE_INTEGER then
+    error("read_csv skip_rows_after_header must be a non-negative integer", 3)
+  end
+  return value
+end
+
 -- Lenient parsing is opt-in because it changes which rows and values survive
 -- a read: ragged rows may be truncated and unparsable values may become null.
 local function csv_boolean_option(options, key)
@@ -1449,7 +1647,7 @@ end
 local function csv_options(options)
   if options == nil then
     return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil,
-      nil, nil, false, false, false
+      nil, nil, false, false, false, 0, false
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -1482,10 +1680,13 @@ local function csv_options(options)
   local truncate_ragged_lines =
     csv_boolean_option(options, "truncate_ragged_lines")
   local ignore_errors = csv_boolean_option(options, "ignore_errors")
+  local skip_rows_after_header = csv_skip_rows_after_header(options)
+  local decimal_comma = csv_boolean_option(options, "decimal_comma")
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
-    try_parse_dates, truncate_ragged_lines, ignore_errors
+    try_parse_dates, truncate_ragged_lines, ignore_errors,
+    skip_rows_after_header, decimal_comma
 end
 
 function polars.read_csv(path, options)
@@ -1495,7 +1696,8 @@ function polars.read_csv(path, options)
   local delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
-    try_parse_dates, truncate_ragged_lines, ignore_errors = csv_options(options)
+    try_parse_dates, truncate_ragged_lines, ignore_errors,
+    skip_rows_after_header, decimal_comma = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -1536,7 +1738,16 @@ function polars.read_csv(path, options)
     end
   end
   local pointer
-  if truncate_ragged_lines or ignore_errors then
+  if skip_rows_after_header > 0 or decimal_comma then
+    pointer = lib.pl_dataframe_read_csv_extended(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, named_columns,
+      named_markers, named_null_columns and #named_null_columns or 0,
+      skip_rows, skip_rows_after_header, n_rows, renames,
+      rename_columns and #rename_columns or 0, encoding,
+      try_parse_dates and 1 or 0, decimal_comma and 1 or 0,
+      truncate_ragged_lines and 1 or 0, ignore_errors and 1 or 0, err)
+  elseif truncate_ragged_lines or ignore_errors then
     pointer = lib.pl_dataframe_read_csv_lenient(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, markers, null_value_count, named_columns,

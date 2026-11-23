@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.19.0
+
+- five DataFrame/IO additions:
+  - `df:reverse()` returns the rows in reverse order while preserving the
+    column names, order, dtypes, and nulls, leaving the input frame unchanged;
+  - `df:cast({ column = dtype })` strictly casts one or more columns to the
+    supported primitive dtypes, preserving column order; unparsable values fail
+    the whole operation instead of becoming null;
+  - `df:unique([columns, options])` compares every column by default, or only a
+    named subset, and supports `keep = "first"`/`"last"`/`"none"`/`"any"` plus
+    `maintain_order = false` for the unstable distinct; the earlier no-argument
+    behavior is preserved;
+  - `df:explode(columns [, options])` flattens list columns into long form, with
+    `keep_nulls` and `empty_as_null` controlling the row produced for null and
+    empty lists; non-list columns are rejected before Polars runs;
+  - `polars.read_csv(..., { skip_rows_after_header = n, decimal_comma = true })`
+    drops data rows after the header before `n_rows` applies and parses a comma
+    as the decimal separator, composing with every earlier reader option;
+- the additive C ABI entry points are `pl_dataframe_reverse`,
+  `pl_dataframe_cast`, `pl_dataframe_unique`, `pl_dataframe_explode`, and
+  `pl_dataframe_read_csv_extended`; every earlier signature and default is
+  unchanged;
+- validation covers empty and malformed cast mappings, unsupported dtypes,
+  unknown or duplicate columns, strict conversion failures, invalid unique keep
+  strategies and option types, non-contiguous subsets, non-list explode columns,
+  invalid explode flags, negative or fractional post-header counts, and
+  non-boolean `decimal_comma`;
+- tests cover reversed row order and input immutability, dtype and value casts,
+  keep strategies including `none` and unstable ordering, list explode with
+  null/empty lists and both flags, post-header windows combined with `n_rows`,
+  decimal-comma parsing with projection and windows, and every new error path;
+- `./scripts/test.sh` passed 147 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validate the installed-prefix and LuaRocks layouts
+  for 0.19.0-1;
+- the 0.19.0 tag is created for this release.
+
 ## 0.18.0
 
 - five DataFrame/IO additions:

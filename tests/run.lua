@@ -85,10 +85,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.18.0")
+  eq(polars.version(), "0.19.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.18.0")
+  eq(polars._VERSION, "0.19.0")
 end)
 
 current = "csv"
@@ -2349,6 +2349,336 @@ end)
 test("null sentinel is available", function()
   truthy(polars.null ~= nil, "null sentinel")
   eq(tostring(polars.null), "null")
+end)
+
+current = "dataframe transforms"
+test("reverse returns rows in reverse order", function()
+  local df = polars.read_csv(fixture)
+  local reversed = df:reverse()
+  eq(reversed:shape(), 5)
+  eq(table.concat(reversed:columns(), ","), "name,team,score,active")
+  local rows = reversed:to_table()
+  eq(rows[1].name, "eva")
+  eq(rows[1].score, 9)
+  eq(rows[5].name, "ana")
+  eq(rows[5].score, 10)
+  eq(df:to_table()[1].name, "ana", "reverse must not change the input")
+  reversed:close()
+
+  local empty = df:head(0):reverse()
+  eq(empty:shape(), 0)
+  eq(#empty:columns(), 4)
+  empty:close()
+  df:close()
+  local ok, err = pcall(function() df:reverse() end)
+  eq(ok, false, "closed reverse accepted")
+  truthy(tostring(err):find("closed", 1, true), "reverse closed-frame error")
+end)
+
+test("cast changes selected dtypes and preserves column order", function()
+  local df = polars.read_csv(fixture)
+  local casted = df:cast({ score = "f64", active = "str" })
+  local schema = casted:schema()
+  eq(schema.score, "f64")
+  eq(schema.active, "str")
+  eq(schema.name, "str")
+  eq(table.concat(casted:columns(), ","), table.concat(df:columns(), ","))
+  local rows = casted:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[1].active, "true")
+  eq(rows[3].active, "false")
+  casted:close()
+
+  local text = df:cast({ score = "str" })
+  eq(text:schema().score, "str")
+  eq(text:to_table()[1].score, "10")
+  text:close()
+
+  local narrow = df:cast({ score = "i32" })
+  eq(narrow:schema().score, "i32")
+  eq(narrow:to_table()[1].score, 10)
+  narrow:close()
+  eq(df:schema().score, "i64", "cast must not change the input")
+  df:close()
+end)
+
+test("cast rejects invalid mappings and conversions", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { 42, "cast expects a table" },
+    { {}, "cast requires at least one column" },
+    { { [1] = "f64" }, "keys must be non-empty column names" },
+    { { score = 42 }, "cast dtypes must be non-empty dtype names" },
+    { { score = "" }, "cast dtypes must be non-empty dtype names" },
+    { { score = "blob" }, "unsupported cast dtype" },
+    { { missing = "f64" }, "not a column in the DataFrame" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:cast(case[1]) end)
+    eq(ok, false, "invalid cast mapping accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:cast({ name = "i64" }) end)
+  eq(ok, false, "unparsable cast accepted")
+  truthy(tostring(err):find("could not cast", 1, true),
+    "cast conversion error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:cast({ score = "f64" }) end)
+  eq(ok, false, "closed cast accepted")
+  truthy(tostring(err):find("closed", 1, true), "cast closed-frame error")
+end)
+
+test("unique supports a column subset and keep strategies", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,name\n1,ana\n2,bia\n1,ana\n1,last\n2,bia\n3,caio\n")
+  file:close()
+  local df = polars.read_csv(path)
+  eq(df:shape(), 6)
+
+  local all = df:unique()
+  eq(all:shape(), 4)
+  all:close()
+
+  local by_id = df:unique("id")
+  eq(by_id:shape(), 3)
+  local rows = by_id:to_table()
+  eq(rows[1].id, 1)
+  eq(rows[1].name, "ana")
+  eq(rows[2].id, 2)
+  eq(rows[3].id, 3)
+  by_id:close()
+
+  local last = df:unique("id", { keep = "LAST" })
+  eq(last:shape(), 3)
+  eq(find_row(last:to_table(), { id = 1 }).name, "last")
+  eq(find_row(last:to_table(), { id = 2 }).name, "bia")
+  last:close()
+
+  local none = df:unique("id", { keep = "none" })
+  eq(none:shape(), 1)
+  eq(none:to_table()[1].id, 3)
+  none:close()
+
+  local unordered = df:unique("id", {
+    keep = "any",
+    maintain_order = false,
+  })
+  eq(unordered:shape(), 3)
+  unordered:close()
+
+  local pair = df:unique({ "id", "name" })
+  eq(pair:shape(), 4)
+  pair:close()
+  df:close()
+end)
+
+test("unique rejects invalid columns, keep strategies, and options", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { 42, nil, "columns must be a column name or a list of names" },
+    { {}, nil, "columns must not be empty" },
+    { { [1] = "name", [3] = "score" }, nil, "contiguous list" },
+    { { "name", "name" }, nil, "duplicate unique column 'name'" },
+    { "missing", nil, "is not a column in the DataFrame" },
+    { "name", "first", "unique options must be a table" },
+    { "name", { keep = 42 }, "unique keep must be a non-empty string" },
+    { "name", { keep = "" }, "unique keep must be a non-empty string" },
+    { "name", { keep = "middle" }, "unique keep must be one of" },
+    { "name", { maintain_order = 1 }, "unique maintain_order must be a boolean" },
+    { "name", { sort = true }, "unknown field 'sort'" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:unique(case[1], case[2]) end)
+    eq(ok, false, "invalid unique arguments accepted")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:unique() end)
+  eq(ok, false, "closed unique accepted")
+  truthy(tostring(err):find("closed", 1, true), "unique closed-frame error")
+end)
+
+test("explode flattens list columns and handles nulls", function()
+  local path = new_temp_path(".json")
+  local file = assert(io.open(path, "w"))
+  file:write('[{"id":1,"tag":["a","b"]},' ..
+    '{"id":2,"tag":[]},{"id":3,"tag":null},' ..
+    '{"id":4,"tag":["c"]}]')
+  file:close()
+  local df = polars.read_json(path)
+  eq(df:schema().tag, "list[str]")
+
+  local exploded = df:explode("tag")
+  eq(exploded:shape(), 5)
+  eq(table.concat(exploded:columns(), ","), "id,tag")
+  local rows = exploded:to_table()
+  eq(rows[1].id, 1)
+  eq(rows[1].tag, "a")
+  eq(rows[2].id, 1)
+  eq(rows[2].tag, "b")
+  eq(find_row(rows, { id = 2 }).tag, polars.null)
+  eq(find_row(rows, { id = 3 }).tag, polars.null)
+  eq(find_row(rows, { id = 4 }).tag, "c")
+  exploded:close()
+
+  local empty_dropped = df:explode("tag", { empty_as_null = false })
+  eq(empty_dropped:shape(), 4)
+  for _, row in ipairs(empty_dropped:to_table()) do
+    truthy(row.id ~= 2, "empty list should be dropped")
+  end
+  empty_dropped:close()
+
+  local null_dropped = df:explode("tag", { keep_nulls = false })
+  eq(null_dropped:shape(), 4)
+  for _, row in ipairs(null_dropped:to_table()) do
+    truthy(row.id ~= 3, "null list should be dropped")
+  end
+  null_dropped:close()
+
+  local listed = df:explode({ "tag" })
+  eq(listed:shape(), 5)
+  listed:close()
+  df:close()
+end)
+
+test("explode rejects non-list columns and malformed options", function()
+  local path = new_temp_path(".json")
+  local file = assert(io.open(path, "w"))
+  file:write('[{"id":1,"tag":["a"]},{"id":2,"tag":["b"]}]')
+  file:close()
+  local df = polars.read_json(path)
+  local cases = {
+    { nil, nil, "columns must be a column name or a list of names" },
+    { {}, nil, "columns must not be empty" },
+    { { "tag", "tag" }, nil, "duplicate explode column 'tag'" },
+    { "missing", nil, "is not a column in the DataFrame" },
+    { "id", nil, "expected a list" },
+    { "tag", "yes", "explode options must be a table" },
+    { "tag", { keep_nulls = 1 }, "keep_nulls must be a boolean" },
+    { "tag", { empty_as_null = "yes" }, "empty_as_null must be a boolean" },
+    { "tag", { flatten = true }, "unknown field 'flatten'" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:explode(case[1], case[2]) end)
+    eq(ok, false, "invalid explode arguments accepted")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:explode("tag") end)
+  eq(ok, false, "closed explode accepted")
+  truthy(tostring(err):find("closed", 1, true), "explode closed-frame error")
+end)
+
+test("read_csv skips rows after the header and composes with n_rows", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("metadata\nid,value\n1,10\n2,20\n3,30\n4,40\n")
+  file:close()
+
+  local window = polars.read_csv(path, {
+    skip_rows = 1,
+    skip_rows_after_header = 1,
+    n_rows = 2,
+  })
+  eq(window:shape(), 2)
+  eq(window:schema().id, "i64")
+  local rows = window:to_table()
+  eq(rows[1].id, 2)
+  eq(rows[1].value, 20)
+  eq(rows[2].id, 3)
+  eq(rows[2].value, 30)
+  window:close()
+
+  local tail = polars.read_csv(path, {
+    skip_rows = 1,
+    skip_rows_after_header = 3,
+  })
+  eq(tail:shape(), 1)
+  eq(tail:to_table()[1].id, 4)
+  tail:close()
+
+  local unchanged = polars.read_csv(path, {
+    skip_rows = 1,
+    skip_rows_after_header = 0,
+  })
+  eq(unchanged:shape(), 4)
+  unchanged:close()
+
+  local headerless_path = new_temp_path(".csv")
+  local headerless_file = assert(io.open(headerless_path, "w"))
+  headerless_file:write("1,10\n2,20\n3,30\n")
+  headerless_file:close()
+  local headerless = polars.read_csv(headerless_path, {
+    header = false,
+    skip_rows_after_header = 1,
+  })
+  eq(headerless:shape(), 2)
+  eq(headerless:to_table()[1].column_1, 2)
+  headerless:close()
+end)
+
+test("read_csv decimal_comma parses comma decimals", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id;price\n1;1,5\n2;2,25\n3;3,75\n")
+  file:close()
+
+  local df = polars.read_csv(path, {
+    delimiter = ";",
+    decimal_comma = true,
+  })
+  eq(df:schema().price, "f64")
+  local rows = df:to_table()
+  eq(rows[1].price, 1.5)
+  eq(rows[2].price, 2.25)
+  eq(rows[3].price, 3.75)
+  df:close()
+
+  local combined = polars.read_csv(path, {
+    delimiter = ";",
+    decimal_comma = true,
+    columns = { "price" },
+    skip_rows_after_header = 1,
+    n_rows = 1,
+  })
+  eq(combined:shape(), 1)
+  eq(table.concat(combined:columns(), ","), "price")
+  eq(combined:to_table()[1].price, 2.25)
+  combined:close()
+
+  local plain = polars.read_csv(path, { delimiter = ";" })
+  eq(plain:schema().price, "str")
+  eq(plain:to_table()[1].price, "1,5")
+  plain:close()
+end)
+
+test("read_csv rejects invalid extended dialect options", function()
+  local cases = {
+    { { skip_rows_after_header = -1 },
+      "skip_rows_after_header must be a non-negative integer" },
+    { { skip_rows_after_header = 1.5 },
+      "skip_rows_after_header must be a non-negative integer" },
+    { { skip_rows_after_header = "2" },
+      "skip_rows_after_header must be a non-negative integer" },
+    { { skip_rows_after_header = true },
+      "skip_rows_after_header must be a non-negative integer" },
+    { { skip_rows_after_header = math.huge },
+      "skip_rows_after_header must be a non-negative integer" },
+    { { skip_rows_after_header = 2 ^ 53 },
+      "skip_rows_after_header must be a non-negative integer" },
+    { { decimal_comma = 1 }, "decimal_comma must be a boolean" },
+    { { decimal_comma = "yes" }, "decimal_comma must be a boolean" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(polars.read_csv, fixture, case[1])
+    eq(ok, false, "invalid extended CSV option accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
 end)
 
 cleanup_temp_files()

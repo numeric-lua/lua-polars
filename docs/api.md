@@ -1,4 +1,4 @@
-# lua-polars API — 0.18.0
+# lua-polars API — 0.19.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.18.0"`).
+Returns the bridge version (`"0.19.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -34,10 +34,21 @@ Polars' default.
   header is parsed, so leading metadata lines can be discarded; Polars respects
   CSV quoting and comments while skipping. The window counts CSV rows, not Lua
   indices, and must be at most `2^53 - 1`.
+- `skip_rows_after_header`: a non-negative integer, default `0`. Drops that
+  many data rows after the header before `n_rows` is applied, so it can skip a
+  section of data without losing the header-derived schema. With
+  `header = false` there is no header row, so it drops that many leading data
+  rows instead. It composes with every other reader option and, like
+  `skip_rows`, must be at most `2^53 - 1`.
 - `n_rows`: a non-negative integer, default unlimited. Limits the number of
   data rows read after the header. `n_rows = 0` reads no data rows while
   keeping the header-derived schema; a limit larger than the file reads the
   remaining rows. Like `skip_rows`, it must be at most `2^53 - 1`.
+- `decimal_comma`: a boolean, default `false`. When true, a comma is parsed as
+  the decimal separator for numeric columns, which is useful with a semicolon
+  or tab `delimiter`. It does not change the field delimiter; the delimiter
+  still has to be one byte and differ from the quote and comment bytes.
+  Non-boolean values are errors.
 - `quote`: a one-byte string used to quote fields, default `"`. Set it to
   `false` or `""` to disable quote parsing. NUL, newline, and carriage-return
   bytes are rejected.
@@ -123,6 +134,14 @@ local window = polars.read_csv("export.csv", {
   skip_rows = 2,
   n_rows = 100,
 })
+local section = polars.read_csv("export.csv", {
+  skip_rows_after_header = 10,
+  n_rows = 25,
+})
+local european = polars.read_csv("prices.csv", {
+  delimiter = ";",
+  decimal_comma = true,
+})
 local renamed = polars.read_csv("headerless.csv", {
   header = false,
   rename_columns = { "id", "name", "score" },
@@ -142,8 +161,9 @@ Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
 collisions, invalid projection names, unsupported or missing dtype overrides,
 invalid or per-column null-value markers, invalid rename lists, unsupported
-encodings, non-boolean lenient options, negative or fractional row-window
-counts, a missing or unreadable path, and files that cannot be parsed.
+encodings, non-boolean lenient options, invalid post-header or pre-header row
+counts, non-boolean `decimal_comma`, a missing or unreadable path, and files
+that cannot be parsed.
 
 ### `polars.read_parquet(path [, options]) -> DataFrame`
 
@@ -265,6 +285,82 @@ are rejected.
 ```lua
 local indexed = df:with_row_index("row_id", 100)
 ```
+
+### `df:reverse() -> DataFrame`
+
+Returns a new frame with the row order reversed. Column names, order, dtypes,
+and nulls are preserved; the input frame is unchanged. An empty frame stays
+empty. Calling it on a closed frame is an error.
+
+```lua
+local newest_first = df:reverse()
+```
+
+### `df:cast(mapping) -> DataFrame`
+
+Casts one or more columns to new dtypes. `mapping` is a non-empty table of
+`column = dtype` pairs. Supported dtype names are `bool`/`boolean`, `i32`/
+`int32`, `i64`/`int64`, `u32`/`uint32`, `u64`/`uint64`, `f32`/`float32`,
+`f64`/`float64`, and `str`/`string`/`utf8`, matched case-insensitively.
+Casting is strict: a value that cannot be converted fails the whole operation
+instead of becoming null. The result keeps the original column order and the
+input frame is unchanged.
+
+```lua
+local typed = df:cast({ score = "f64", active = "str" })
+```
+
+An empty mapping, non-table input, empty or non-string column/dtype names,
+unsupported dtypes, unknown columns, unparsable values, and closed frames are
+errors.
+
+### `df:unique([columns, options]) -> DataFrame`
+
+Returns distinct rows. With no column argument every column participates,
+preserving the earlier `unique()` result. `columns` may be a single name or a
+non-empty contiguous list to compare only those columns; unknown, duplicate,
+empty, and malformed names are errors.
+
+`options` is an optional table:
+
+- `keep`: `"first"` (default), `"last"`, `"none"`, or `"any"`, matched
+  case-insensitively. `first` and `last` keep that occurrence, `none` drops
+  every row whose key repeats, and `any` allows Polars to choose.
+- `maintain_order`: a boolean, default `true`. Keeps the first-seen row order
+  for a stable result; `false` permits the faster unstable distinct.
+
+```lua
+local all_unique = df:unique()
+local one_per_id = df:unique("id")
+local last_per_id = df:unique("id", { keep = "last" })
+local only_unrepeated = df:unique("id", { keep = "none" })
+```
+
+Unknown option keys, non-string or unsupported `keep` values, non-boolean
+`maintain_order`, malformed column lists, and closed frames are errors.
+
+### `df:explode(columns [, options]) -> DataFrame`
+
+Flattens one or more list columns into long form, repeating the other columns
+for each element. `columns` is a single name or a non-empty contiguous list,
+and every named column must have a list dtype; a non-list column is an error.
+
+`options` is an optional table:
+
+- `keep_nulls`: a boolean, default `true`. Keeps one null row for a null list.
+- `empty_as_null`: a boolean, default `true`. Keeps one null row for an empty
+  list instead of dropping it.
+
+```lua
+local tagged = df:explode("tags")
+local compact = df:explode("tags", {
+  keep_nulls = false,
+  empty_as_null = false,
+})
+```
+
+Unknown option keys, non-boolean flags, empty or malformed column lists,
+non-list columns, unknown columns, and closed frames are errors.
 
 ### `df:drop_nulls([columns]) -> DataFrame`
 
@@ -631,6 +727,19 @@ PlFrame *pl_dataframe_read_csv_lenient(
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, int32_t try_parse_dates,
     int32_t truncate_ragged_lines, int32_t ignore_errors, char **err);
+PlFrame *pl_dataframe_read_csv_extended(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, uint64_t skip_rows_after_header, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t decimal_comma, int32_t truncate_ragged_lines,
+    int32_t ignore_errors, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -648,6 +757,15 @@ PlFrame *pl_dataframe_slice(
     PlFrame *frame, int64_t offset, uint64_t length, char **err);
 PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
+PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_cast(
+    PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
+PlFrame *pl_dataframe_unique(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    const char *keep, int32_t maintain_order, char **err);
+PlFrame *pl_dataframe_explode(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    int32_t keep_nulls, int32_t empty_as_null, char **err);
 PlFrame *pl_dataframe_join(
     PlFrame *left, PlFrame *right, const char *how,
     const char *const *left_on, uint64_t left_count,
@@ -687,6 +805,23 @@ void pl_string_free(char *value);
 truncates rows wider than the header, and `ignore_errors` turns values that
 cannot be parsed into nulls while keeping the rest of the rows. Both flags are
 zero by default in every earlier reader entry point.
+
+`pl_dataframe_read_csv_extended` is additive and carries every option from
+`pl_dataframe_read_csv_lenient` plus `uint64_t skip_rows_after_header` and
+`int32_t decimal_comma`. The post-header count drops data rows after the header
+before `n_rows` applies; a non-zero `decimal_comma` parses a comma as the
+decimal separator while the one-byte delimiter keeps its earlier rules. Both
+default to zero in every earlier reader entry point.
+
+`pl_dataframe_reverse` returns a newly owned frame with the same columns and
+reversed row order. `pl_dataframe_cast` borrows `pair_count` `column`, `dtype`
+string pairs (a flat array of `2 * pair_count` names); casting is strict and
+preserves column order. `pl_dataframe_unique` borrows an optional column list
+and a keep string (`first`, `last`, `none`, or `any`), with a non-zero
+`maintain_order` selecting the stable distinct. `pl_dataframe_explode`
+borrows a non-empty list of list-typed columns; `keep_nulls` and
+`empty_as_null` control the null/empty-list rows. All four are additive and
+leave the input handle open.
 
 `pl_dataframe_write_csv_precise` is additive and carries every option from
 `pl_dataframe_write_csv_configured` plus `int64_t float_precision`, where `-1`
@@ -826,7 +961,7 @@ failure.
 
 ### LuaRocks source rock
 
-`lua-polars-0.18.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.19.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -835,13 +970,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.18.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.19.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.18.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.19.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
@@ -882,6 +1017,10 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV reader per-column null-value markers.
 - [x] CSV reader row windows (`skip_rows`, `n_rows`).
 - [x] CSV reader positional column renaming and UTF-8 lossy decoding.
+- [x] CSV reader post-header row windows and decimal-comma numbers.
+- [x] DataFrame row reversal and strict column casting.
+- [x] Distinct rows with column subsets and keep strategies.
+- [x] List-column explode with null/empty-list controls.
 - [x] CSV writer delimiter, header, and null-value options.
 - [x] CSV writer line terminator (`\n`, `\r\n`).
 - [x] Parquet reader column projection and row windows.

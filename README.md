@@ -26,7 +26,7 @@ end
 
 ## Status
 
-`0.18.0` is an eager-first MVP:
+`0.19.0` is an eager-first MVP:
 
 - CSV, Parquet, and JSON readers and writers
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
@@ -38,6 +38,8 @@ end
   `f64`, `str`), `null_values` as a literal marker string or list of markers
   applied to every column, or a table mapping column names to one marker each,
   a `skip_rows`/`n_rows` window over the rows before and after the header,
+  `skip_rows_after_header` to drop data rows after the header before `n_rows`,
+  `decimal_comma = true` for comma-decimal numeric fields,
   `try_parse_dates = true` for ISO date/datetime inference,
   `encoding = "utf8-lossy"` for invalid UTF-8 input,
   `truncate_ragged_lines = true` to truncate rows wider than the header, and
@@ -61,6 +63,9 @@ end
   and with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and raw `to_json()`, plus `read_json`/`write_json`
+- `reverse()` for row order, `cast(mapping)` for strict column dtype changes,
+  `unique([columns, options])` with subsets and first/last/none/any keep
+  strategies, and `explode(columns [, options])` for list columns
 - `drop_nulls([columns])` with an optional column subset, `fill_null(value
   [, columns])` for scalar and column-scoped replacement, `unique()`/
   `null_count()`, and row iteration helpers
@@ -107,11 +112,13 @@ The test suite is dependency-free and covers CSV/Parquet/JSON parsing and
 writing, custom CSV delimiters, quote characters, comment prefixes, headerless
 files, read-time column projection, positional column renaming, dtype overrides,
 literal and per-column null markers, UTF-8 lossy decoding,
-skip-rows/row-limit windows, CSV date inference and writer quote styles,
+skip-rows/row-limit windows, post-header row skipping, decimal-comma numbers,
+CSV date inference and writer quote styles,
 writer delimiter/header/null/line-terminator options,
 Parquet column projections, row windows, compression codecs, statistics and
 chunk-size writer options, JSON array/JSON Lines round-trips, schema, head,
-tail, slice, row indexing, projection,
+tail, slice, row indexing, projection, row reversal, strict casting,
+subset distinct rows, list-column explode,
 filtering, sorting, grouping, all eager join types, column operations, SQL,
 JSON conversion, and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
@@ -134,17 +141,17 @@ Lua loader also searches the directories on `package.cpath`, so no
 `POLARS_LUA_LIB` is needed.
 
 ```sh
-luarocks make lua-polars-0.18.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.19.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 For a clean checkout the first command compiles Polars; set
 `CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec and
-`scripts/build.sh` default to one job). The source URL points at the `v0.18.0`
+`scripts/build.sh` default to one job). The source URL points at the `v0.19.0`
 tag, which is created as part of the release: use `luarocks make` from a
 checkout before the tag exists, and
-`luarocks build lua-polars-0.18.0-1.rockspec` afterwards. Both use the same
+`luarocks build lua-polars-0.19.0-1.rockspec` afterwards. Both use the same
 build and install commands.
 
 ## Install into a prefix
@@ -182,6 +189,8 @@ polars.read_csv(path, {
   truncate_ragged_lines = true,
   ignore_errors = true,
   skip_rows = 1,
+  skip_rows_after_header = 10,
+  decimal_comma = true,
   n_rows = 100,
 })
 polars.read_csv(path, {
@@ -206,6 +215,10 @@ df:head(n)
 df:tail(n)
 df:slice(offset, length)
 df:with_row_index("row_id", 100)
+df:reverse()
+df:cast({ score = "f64" })
+df:unique("team", { keep = "last" })
+df:explode("tags", { keep_nulls = false })
 df:sql(query)
 df:select("a", "b")
 df:filter('"a" > 3')

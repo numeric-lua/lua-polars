@@ -52,9 +52,11 @@ struct CsvReadConfig {
     named_null_values: Option<Vec<(String, String)>>,
     rename_columns: Option<Vec<String>>,
     skip_rows: usize,
+    skip_rows_after_header: usize,
     n_rows: Option<usize>,
     encoding: CsvEncoding,
     try_parse_dates: bool,
+    decimal_comma: bool,
     truncate_ragged_lines: bool,
     ignore_errors: bool,
 }
@@ -72,9 +74,11 @@ impl Default for CsvReadConfig {
             named_null_values: None,
             rename_columns: None,
             skip_rows: 0,
+            skip_rows_after_header: 0,
             n_rows: None,
             encoding: CsvEncoding::Utf8,
             try_parse_dates: false,
+            decimal_comma: false,
             truncate_ragged_lines: false,
             ignore_errors: false,
         }
@@ -288,6 +292,33 @@ fn parse_csv_dtype(value: &str) -> Result<DataType, String> {
         _ => {
             return Err(format!(
                 "unsupported CSV dtype '{value}'; expected bool, i32, i64, u32, u64, \
+                 f32, f64, or str"
+            ))
+        },
+    };
+    Ok(dtype)
+}
+
+/// Maps a Lua-facing dtype name to a Polars dtype for `DataFrame:cast`.
+///
+/// The cast surface supports the same primitive dtypes as CSV overrides:
+/// booleans, signed and unsigned 32/64-bit integers, 32/64-bit floats, and
+/// strings. Date and datetime dtypes stay out because casting arbitrary
+/// strings to them needs an explicit format policy. Names are matched
+/// case-insensitively.
+fn parse_cast_dtype(value: &str) -> Result<DataType, String> {
+    let dtype = match value.to_ascii_lowercase().as_str() {
+        "bool" | "boolean" => DataType::Boolean,
+        "i32" | "int32" => DataType::Int32,
+        "i64" | "int64" => DataType::Int64,
+        "u32" | "uint32" => DataType::UInt32,
+        "u64" | "uint64" => DataType::UInt64,
+        "f32" | "float32" => DataType::Float32,
+        "f64" | "float64" => DataType::Float64,
+        "str" | "string" | "utf8" => DataType::String,
+        _ => {
+            return Err(format!(
+                "unsupported cast dtype '{value}'; expected bool, i32, i64, u32, u64, \
                  f32, f64, or str"
             ))
         },
@@ -620,6 +651,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
     let frame = CsvReadOptions::default()
         .with_has_header(config.has_header)
         .with_skip_rows(config.skip_rows)
+        .with_skip_rows_after_header(config.skip_rows_after_header)
         .with_n_rows(config.n_rows)
         .with_columns(columns)
         .with_schema_overwrite(schema_overwrite)
@@ -632,6 +664,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
                 .with_null_values(null_values.clone())
                 .with_encoding(config.encoding)
                 .with_try_parse_dates(config.try_parse_dates)
+                .with_decimal_comma(config.decimal_comma)
                 .with_truncate_ragged_lines(config.truncate_ragged_lines)
         })
         .try_into_reader_with_file_path(Some(PathBuf::from(path)))
@@ -704,6 +737,41 @@ fn validate_keys(df: &DataFrame, keys: &[String], side: &str) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+/// Reads a borrowed list of column names for a DataFrame operation.
+///
+/// A zero count is an empty list; the caller decides whether that means "all
+/// columns" or is an error. A non-zero count with a null pointer, an empty
+/// name, or a duplicate name is rejected before Polars sees the request.
+unsafe fn read_name_list(
+    ptr: *const *const c_char,
+    count: u64,
+    label: &str,
+) -> Result<Vec<String>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if ptr.is_null() {
+        return Err(format!("{label} are null"));
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| format!("{label} count is too large"))?;
+    let raw = std::slice::from_raw_parts(ptr, count);
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::with_capacity(count);
+    for (index, &name_ptr) in raw.iter().enumerate() {
+        let name = read_utf8(name_ptr, &format!("{label} at index {index}"))?;
+        if name.is_empty() {
+            return Err(format!("{label} at index {index} must not be empty"));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate {label} '{name}'"));
+        }
+        names.push(name);
+    }
+    Ok(names)
 }
 
 fn c_string(value: &str) -> *mut c_char {
@@ -1354,6 +1422,79 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_lenient(
     finish_frame(result, err)
 }
 
+/// Reads a CSV file with every earlier reader option plus post-header and
+/// decimal-comma controls.
+///
+/// This is the superset reader entry point for the dialect controls.
+/// `skip_rows_after_header` drops that many data rows after the header; when
+/// `has_header` is zero there is no header, so it drops leading data rows.
+/// The skip happens before `n_rows` is applied. It must fit this platform's
+/// `usize`. `decimal_comma` is non-zero to parse a comma as the decimal
+/// separator, which is useful with a semicolon or tab delimiter; delimiters and
+/// quote/comment bytes keep their earlier rules.
+///
+/// All shared arguments have the same meaning as in
+/// [`pl_dataframe_read_csv_lenient`]. This entry point is additive; every
+/// earlier reader signature and default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_extended(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    null_columns: *const *const c_char,
+    named_null_values: *const *const c_char,
+    named_null_value_count: u64,
+    skip_rows: u64,
+    skip_rows_after_header: u64,
+    n_rows: i64,
+    rename_columns: *const *const c_char,
+    rename_column_count: u64,
+    encoding: *const c_char,
+    try_parse_dates: i32,
+    decimal_comma: i32,
+    truncate_ragged_lines: i32,
+    ignore_errors: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
+            skip_rows,
+            n_rows,
+        )?;
+        config.skip_rows_after_header = usize::try_from(skip_rows_after_header)
+            .map_err(|_| "CSV skip_rows_after_header is too large for this platform".to_string())?;
+        config.encoding = read_csv_encoding(encoding)?;
+        config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
+        config.named_null_values =
+            read_csv_named_null_values(null_columns, named_null_values, named_null_value_count)?;
+        config.try_parse_dates = try_parse_dates != 0;
+        config.decimal_comma = decimal_comma != 0;
+        config.truncate_ragged_lines = truncate_ragged_lines != 0;
+        config.ignore_errors = ignore_errors != 0;
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_parquet(
     path: *const c_char,
@@ -1677,6 +1818,201 @@ pub unsafe extern "C" fn pl_dataframe_with_row_index(
         frame
             .df
             .with_row_index(PlSmallStr::from_str(&name), Some(offset))
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
+/// Returns a frame with the row order reversed.
+///
+/// Column order, names, dtypes, and nulls are preserved; only the row order
+/// changes. An empty frame stays empty. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_reverse(
+    ptr: *mut PlFrame,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        Ok(frame.df.reverse())
+    }));
+    finish_frame(result, err)
+}
+
+/// Casts one or more columns to new dtypes.
+///
+/// `pairs` is a flat array of `column`, `dtype` string pairs and `pair_count`
+/// is the number of pairs. Every named column must exist and every dtype must
+/// be one of the primitive cast dtypes documented on [`parse_cast_dtype`].
+/// Casting is strict: values that cannot be converted fail the whole operation
+/// and leave the input frame unchanged. Column order and names are preserved.
+/// This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_cast(
+    ptr: *mut PlFrame,
+    pairs: *const *const c_char,
+    pair_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        if pair_count == 0 {
+            return Err("cast requires at least one column".to_string());
+        }
+        if pairs.is_null() {
+            return Err("cast columns are null".to_string());
+        }
+        let pair_count: usize = pair_count
+            .try_into()
+            .map_err(|_| "cast column count is too large".to_string())?;
+        let value_count = pair_count
+            .checked_mul(2)
+            .ok_or_else(|| "cast column count is too large".to_string())?;
+        let raw = std::slice::from_raw_parts(pairs, value_count);
+        let mut seen = std::collections::HashSet::new();
+        let mut output = frame.df.clone();
+        for index in 0..pair_count {
+            let column = read_utf8(
+                raw[index * 2],
+                &format!("cast column at index {index}"),
+            )?;
+            if column.is_empty() {
+                return Err(format!(
+                    "cast column at index {index} must not be empty"
+                ));
+            }
+            if !seen.insert(column.clone()) {
+                return Err(format!("duplicate cast column '{column}'"));
+            }
+            let dtype_name = read_utf8(
+                raw[index * 2 + 1],
+                &format!("cast dtype for '{column}'"),
+            )?;
+            if dtype_name.is_empty() {
+                return Err(format!("cast dtype for '{column}' must not be empty"));
+            }
+            let dtype = parse_cast_dtype(&dtype_name)?;
+            let column_index = output.get_column_index(column.as_str()).ok_or_else(|| {
+                format!("cast column '{column}' is not a column in the DataFrame")
+            })?;
+            let casted = output.columns()[column_index]
+                .strict_cast(&dtype)
+                .map_err(|error| format!("could not cast column '{column}' to {dtype}: {error}"))?;
+            output
+                .with_column(casted)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(output)
+    }));
+    finish_frame(result, err)
+}
+
+/// Parses a `unique` keep strategy from the C ABI.
+fn parse_unique_keep(value: Option<&str>) -> Result<UniqueKeepStrategy, String> {
+    match value.unwrap_or("first").to_ascii_lowercase().as_str() {
+        "" | "first" => Ok(UniqueKeepStrategy::First),
+        "last" => Ok(UniqueKeepStrategy::Last),
+        "none" => Ok(UniqueKeepStrategy::None),
+        "any" => Ok(UniqueKeepStrategy::Any),
+        other => Err(format!(
+            "unsupported unique keep '{other}'; expected first, last, none, or any"
+        )),
+    }
+}
+
+/// Returns distinct rows, optionally using a column subset and keep strategy.
+///
+/// A null/zero `columns` count compares every column. `keep` is `first`
+/// (default), `last`, `none`, or `any`, matched case-insensitively.
+/// `maintain_order` is non-zero to keep the first-seen row order, matching
+/// Polars' stable distinct. Names are borrowed for the call. This entry point
+/// is additive; the earlier `unique()` Lua helper keeps its all-column result.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_unique(
+    ptr: *mut PlFrame,
+    columns: *const *const c_char,
+    column_count: u64,
+    keep: *const c_char,
+    maintain_order: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let names = read_name_list(columns, column_count, "unique columns")?;
+        for name in &names {
+            if frame.df.get_column_index(name.as_str()).is_none() {
+                return Err(format!(
+                    "unique column '{name}' is not a column in the DataFrame"
+                ));
+            }
+        }
+        let keep = if keep.is_null() {
+            UniqueKeepStrategy::First
+        } else {
+            let value = read_utf8(keep, "unique keep")?;
+            parse_unique_keep(Some(value.as_str()))?
+        };
+        let subset = if names.is_empty() {
+            None
+        } else {
+            Some(
+                names
+                    .iter()
+                    .map(|name| PlSmallStr::from_str(name.as_str()))
+                    .collect(),
+            )
+        };
+        frame
+            .df
+            .unique_impl(maintain_order != 0, subset, keep, None)
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
+/// Explodes one or more list columns into long form.
+///
+/// `columns` points to a non-empty list of list-typed column names.
+/// `keep_nulls` is non-zero to keep one null row for a null list, and
+/// `empty_as_null` is non-zero to keep one null row for an empty list. Both
+/// default to true in the Lua surface. At least one list column is required;
+/// non-list columns are rejected with a precise error. This entry point is
+/// additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_explode(
+    ptr: *mut PlFrame,
+    columns: *const *const c_char,
+    column_count: u64,
+    keep_nulls: i32,
+    empty_as_null: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let names = read_name_list(columns, column_count, "explode columns")?;
+        if names.is_empty() {
+            return Err("explode requires at least one column".to_string());
+        }
+        for name in &names {
+            let column = frame.df.column(name.as_str()).map_err(|_| {
+                format!("explode column '{name}' is not a column in the DataFrame")
+            })?;
+            if !matches!(column.dtype(), DataType::List(_)) {
+                return Err(format!(
+                    "explode column '{name}' has dtype {}; expected a list",
+                    column.dtype()
+                ));
+            }
+        }
+        frame
+            .df
+            .explode(
+                names.iter().map(|name| name.as_str()),
+                ExplodeOptions {
+                    keep_nulls: keep_nulls != 0,
+                    empty_as_null: empty_as_null != 0,
+                },
+            )
             .map_err(|error| error.to_string())
     }));
     finish_frame(result, err)
