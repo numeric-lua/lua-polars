@@ -249,6 +249,20 @@ are rejected.
 local indexed = df:with_row_index("row_id", 100)
 ```
 
+### `df:drop_nulls([columns]) -> DataFrame`
+
+Drops rows that contain a null in any selected column. With no argument every
+column participates, preserving the earlier behavior. `columns` may be a single
+column name or a non-empty contiguous list of names; unknown, empty, duplicate,
+and malformed names are errors, and the result keeps the original schema and
+column order.
+
+```lua
+local complete = df:drop_nulls()              -- any null
+local scored = df:drop_nulls("score")        -- only null scores
+local keyed = df:drop_nulls({ "id", "name" }) -- either key null
+```
+
 ### `df:sql(query) -> DataFrame`
 
 Runs a Polars SQL query with the current frame registered as table `df`. The

@@ -58,8 +58,8 @@ end
   that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and raw `to_json()`, plus `read_json`/`write_json`
-- `drop_nulls()`/`fill_null()`, `unique()`/`null_count()`, and row iteration
-  helpers
+- `drop_nulls([columns])` with an optional column subset, `fill_null()`,
+  `unique()`/`null_count()`, and row iteration helpers
 - explicit `:close()` plus Lua GC finalization
 - a LuaRocks source rockspec and a self-contained prefix install
 

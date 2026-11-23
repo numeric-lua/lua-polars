@@ -2131,6 +2131,58 @@ test("drop_nulls and fill_null work on CSV nulls", function()
   eq(ok, false); bad:close()
 end)
 
+test("drop_nulls accepts a column subset", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local by_id = df:drop_nulls("id")
+  eq(by_id:shape(), 3)
+  by_id:close()
+
+  local by_note = df:drop_nulls("note")
+  eq(by_note:shape(), 2)
+  local rows = by_note:to_table()
+  eq(rows[1].id, 1)
+  eq(rows[2].id, 2)
+  eq(table.concat(by_note:columns(), ","), "id,name,note")
+  by_note:close()
+
+  local by_pair = df:drop_nulls({ "name", "note" })
+  eq(by_pair:shape(), 2)
+  by_pair:close()
+
+  local all = df:drop_nulls()
+  eq(all:shape(), 2)
+  all:close()
+
+  local no_nulls = polars.read_csv(fixture):drop_nulls({ "team", "score" })
+  eq(no_nulls:shape(), 5)
+  no_nulls:close()
+  df:close()
+end)
+test("drop_nulls rejects invalid subsets", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { true, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { id = true }, "columns must be a column name or a list of names" },
+    { { [1] = "id", [3] = "note" }, "contiguous list" },
+    { { "" }, "entries must be non-empty strings" },
+    { { 42 }, "entries must be non-empty strings" },
+    { { "id", "id" }, "duplicate drop_nulls column 'id'" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:drop_nulls(case[1]) end)
+    eq(ok, false, "invalid drop_nulls subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:drop_nulls("id") end)
+  eq(ok, false, "closed drop_nulls accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed drop_nulls error")
+end)
+
 test("row iteration and emptiness helpers", function()
   local df = polars.read_csv(fixture)
   local count = 0

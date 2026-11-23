@@ -606,9 +606,72 @@ function DataFrame:null_count()
   return counts
 end
 
-function DataFrame:drop_nulls()
+-- Accepts a column name or a contiguous list of names and checks it against
+-- the live frame. The helpers that take an optional subset use this to report
+-- typos before Polars sees the SQL, while a nil subset keeps the all-column
+-- behavior of the earlier API.
+local function subset_columns(frame, value, label)
+  if value == nil then
+    return nil
+  end
+  local columns
+  if type(value) == "string" then
+    columns = { value }
+  elseif type(value) == "table" then
+    columns = value
+  else
+    error(label .. " columns must be a column name or a list of names", 3)
+  end
+  local keys = {}
+  for key in pairs(columns) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      error(label .. " columns must be a column name or a list of names", 3)
+    end
+    keys[#keys + 1] = key
+  end
+  if #keys == 0 then
+    error(label .. " columns must not be empty", 3)
+  end
+  table.sort(keys)
+  for index, key in ipairs(keys) do
+    if key ~= index then
+      error(label .. " columns must be a contiguous list of names", 3)
+    end
+  end
+  local available = {}
+  for _, name in ipairs(frame:columns()) do
+    available[name] = true
+  end
+  local seen = {}
+  local result = {}
+  for index = 1, #keys do
+    local name = columns[index]
+    if type(name) ~= "string" or name == "" then
+      error(label .. " columns entries must be non-empty strings", 3)
+    end
+    if seen[name] then
+      error("duplicate " .. label .. " column '" .. name .. "'", 3)
+    end
+    seen[name] = true
+    if not available[name] then
+      error(label .. " column '" .. name ..
+        "' is not a column in the DataFrame", 3)
+    end
+    result[index] = name
+  end
+  return result
+end
+
+-- With no argument every column participates, matching the earlier behavior.
+-- A name or list limits the null check to those columns; rows with a null in
+-- any selected column are dropped and the schema is unchanged.
+function DataFrame:drop_nulls(columns)
+  local selected = subset_columns(self, columns, "drop_nulls")
+  if selected == nil then
+    selected = self:columns()
+  end
   local conditions = {}
-  for _, name in ipairs(self:columns()) do
+  for _, name in ipairs(selected) do
     conditions[#conditions + 1] = quote_identifier(name) .. " IS NOT NULL"
   end
   return self:sql("SELECT * FROM df WHERE " .. table.concat(conditions, " AND "))
