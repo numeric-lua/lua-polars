@@ -77,6 +77,18 @@ PlFrame *pl_dataframe_read_csv_parsed(
     uint64_t skip_rows, int64_t n_rows,
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, int32_t try_parse_dates, char **err);
+PlFrame *pl_dataframe_read_csv_lenient(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t truncate_ragged_lines, int32_t ignore_errors, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -1109,6 +1121,8 @@ local CSV_OPTION_KEYS = {
   n_rows = true,
   encoding = true,
   try_parse_dates = true,
+  truncate_ragged_lines = true,
+  ignore_errors = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -1394,10 +1408,23 @@ local function csv_try_parse_dates(value)
   return value
 end
 
+-- Lenient parsing is opt-in because it changes which rows and values survive
+-- a read: ragged rows may be truncated and unparsable values may become null.
+local function csv_boolean_option(options, key)
+  local value = options[key]
+  if value == nil then
+    return false
+  end
+  if type(value) ~= "boolean" then
+    error("read_csv " .. key .. " must be a boolean", 3)
+  end
+  return value
+end
+
 local function csv_options(options)
   if options == nil then
     return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil,
-      nil, nil, false
+      nil, nil, false, false, false
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -1427,10 +1454,13 @@ local function csv_options(options)
   local skip_rows, n_rows, window_requested = csv_row_window(options)
   local encoding = csv_encoding(options.encoding)
   local try_parse_dates = csv_try_parse_dates(options.try_parse_dates)
+  local truncate_ragged_lines =
+    csv_boolean_option(options, "truncate_ragged_lines")
+  local ignore_errors = csv_boolean_option(options, "ignore_errors")
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
-    try_parse_dates
+    try_parse_dates, truncate_ragged_lines, ignore_errors
 end
 
 function polars.read_csv(path, options)
@@ -1440,7 +1470,7 @@ function polars.read_csv(path, options)
   local delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
-    try_parse_dates = csv_options(options)
+    try_parse_dates, truncate_ragged_lines, ignore_errors = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -1481,7 +1511,15 @@ function polars.read_csv(path, options)
     end
   end
   local pointer
-  if try_parse_dates then
+  if truncate_ragged_lines or ignore_errors then
+    pointer = lib.pl_dataframe_read_csv_lenient(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, named_columns,
+      named_markers, named_null_columns and #named_null_columns or 0,
+      skip_rows, n_rows, renames, rename_columns and #rename_columns or 0,
+      encoding, try_parse_dates and 1 or 0, truncate_ragged_lines and 1 or 0,
+      ignore_errors and 1 or 0, err)
+  elseif try_parse_dates then
     pointer = lib.pl_dataframe_read_csv_parsed(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, markers, null_value_count, named_columns,

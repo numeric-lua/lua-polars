@@ -55,6 +55,8 @@ struct CsvReadConfig {
     n_rows: Option<usize>,
     encoding: CsvEncoding,
     try_parse_dates: bool,
+    truncate_ragged_lines: bool,
+    ignore_errors: bool,
 }
 
 impl Default for CsvReadConfig {
@@ -73,6 +75,8 @@ impl Default for CsvReadConfig {
             n_rows: None,
             encoding: CsvEncoding::Utf8,
             try_parse_dates: false,
+            truncate_ragged_lines: false,
+            ignore_errors: false,
         }
     }
 }
@@ -617,6 +621,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
         .with_n_rows(config.n_rows)
         .with_columns(columns)
         .with_schema_overwrite(schema_overwrite)
+        .with_ignore_errors(config.ignore_errors)
         .map_parse_options(|options| {
             options
                 .with_separator(config.delimiter)
@@ -625,6 +630,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
                 .with_null_values(null_values.clone())
                 .with_encoding(config.encoding)
                 .with_try_parse_dates(config.try_parse_dates)
+                .with_truncate_ragged_lines(config.truncate_ragged_lines)
         })
         .try_into_reader_with_file_path(Some(PathBuf::from(path)))
         .map_err(|error| error.to_string())?
@@ -1275,6 +1281,72 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_parsed(
         config.named_null_values =
             read_csv_named_null_values(null_columns, named_null_values, named_null_value_count)?;
         config.try_parse_dates = try_parse_dates != 0;
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a CSV file with every earlier reader option plus lenient parsing.
+///
+/// This is the superset entry point for ragged lines and recoverable parse
+/// errors. `truncate_ragged_lines` is non-zero to truncate rows that contain
+/// more fields than the header instead of failing the read. `ignore_errors` is
+/// non-zero to keep the rows Polars can parse and represent values it cannot
+/// parse as nulls instead of failing the whole read. Both flags default to
+/// false in every earlier reader entry point.
+///
+/// All shared arguments have the same meaning as in
+/// [`pl_dataframe_read_csv_parsed`]. This entry point is additive; every
+/// earlier reader signature and default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_lenient(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    null_columns: *const *const c_char,
+    named_null_values: *const *const c_char,
+    named_null_value_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    rename_columns: *const *const c_char,
+    rename_column_count: u64,
+    encoding: *const c_char,
+    try_parse_dates: i32,
+    truncate_ragged_lines: i32,
+    ignore_errors: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
+            skip_rows,
+            n_rows,
+        )?;
+        config.encoding = read_csv_encoding(encoding)?;
+        config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
+        config.named_null_values =
+            read_csv_named_null_values(null_columns, named_null_values, named_null_value_count)?;
+        config.try_parse_dates = try_parse_dates != 0;
+        config.truncate_ragged_lines = truncate_ragged_lines != 0;
+        config.ignore_errors = ignore_errors != 0;
         read_csv_frame(&path, config)
     }));
     finish_frame(result, err)

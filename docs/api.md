@@ -63,6 +63,16 @@ Polars' default.
   ISO-looking column still has dtype `str`. The option composes with projection,
   dtype overrides, null markers, renames, the row window, and the encoding.
   Non-boolean values are errors.
+- `truncate_ragged_lines`: a boolean, default `false`. When true, rows with
+  more fields than the header are truncated to the header width instead of
+  failing the read. It composes with projection, dtype overrides, null markers,
+  renames, the row window, encoding, and date inference.
+- `ignore_errors`: a boolean, default `false`. When true, values Polars cannot
+  parse for the inferred or overridden dtype become null and the remaining
+  rows are kept instead of failing the whole read. The affected rows may have
+  nulls in only the failed column; use a matching dtype override and
+  `null_values` policy to make the recovery explicit. Both lenient options are
+  rejected when non-boolean.
 - `dtypes`: a table mapping column names to dtype names, applied by name at
   read time instead of relying on inference. Supported dtypes are `bool` /
   `boolean`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, and `str` / `string` /
@@ -119,14 +129,21 @@ local renamed = polars.read_csv("headerless.csv", {
 })
 local lossy = polars.read_csv("legacy.csv", { encoding = "utf8-lossy" })
 local dated = polars.read_csv("events.csv", { try_parse_dates = true })
+local ragged = polars.read_csv("export.csv", {
+  truncate_ragged_lines = true,
+})
+local recovered = polars.read_csv("legacy.csv", {
+  dtypes = { score = "i64" },
+  ignore_errors = true,
+})
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
 Errors also cover invalid option types, invalid one-byte values, option
 collisions, invalid projection names, unsupported or missing dtype overrides,
-invalid or per-column null-value markers, invalid rename lists, unsupported encodings,
-negative or fractional row-window counts, a missing or unreadable path, and
-files that cannot be parsed.
+invalid or per-column null-value markers, invalid rename lists, unsupported
+encodings, non-boolean lenient options, negative or fractional row-window
+counts, a missing or unreadable path, and files that cannot be parsed.
 
 ### `polars.read_parquet(path [, options]) -> DataFrame`
 
@@ -595,6 +612,18 @@ PlFrame *pl_dataframe_read_csv_parsed(
     uint64_t skip_rows, int64_t n_rows,
     const char *const *rename_columns, uint64_t rename_column_count,
     const char *encoding, int32_t try_parse_dates, char **err);
+PlFrame *pl_dataframe_read_csv_lenient(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t truncate_ragged_lines, int32_t ignore_errors, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -640,6 +669,12 @@ int pl_dataframe_write_json(
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ```
+
+`pl_dataframe_read_csv_lenient` is additive and carries every option from
+`pl_dataframe_read_csv_parsed` plus two non-zero flags. `truncate_ragged_lines`
+truncates rows wider than the header, and `ignore_errors` turns values that
+cannot be parsed into nulls while keeping the rest of the rows. Both flags are
+zero by default in every earlier reader entry point.
 
 Returned `char *` values and error strings must be freed with
 `pl_string_free`. A null frame pointer indicates an error when `err` is set.

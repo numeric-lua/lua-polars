@@ -1060,6 +1060,105 @@ test("try_parse_dates rejects non-boolean values", function()
       "try_parse_dates guidance: " .. tostring(err))
   end
 end)
+test("truncate_ragged_lines keeps rows with extra fields", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("name,team,score\nana,red,10\nbia,blue,20,extra\n" ..
+    "caio,red,30\n")
+  file:close()
+
+  local ok, err = pcall(polars.read_csv, path)
+  eq(ok, false, "ragged CSV accepted by default")
+  truthy(tostring(err):find("fields", 1, true) or
+    tostring(err):find("Schema", 1, true), "ragged CSV error: " .. tostring(err))
+
+  local df = polars.read_csv(path, { truncate_ragged_lines = true })
+  eq(df:shape(), 3)
+  eq(table.concat(df:columns(), ","), "name,team,score")
+  eq(df:schema().score, "i64")
+  local rows = df:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[2].name, "bia")
+  eq(rows[2].score, 20)
+  eq(rows[3].team, "red")
+  df:close()
+
+  local combined = polars.read_csv(path, {
+    truncate_ragged_lines = true,
+    columns = { "score", "name" },
+    dtypes = { score = "f64" },
+    n_rows = 2,
+    rename_columns = { "points", "who" },
+  })
+  eq(combined:shape(), 2)
+  eq(table.concat(combined:columns(), ","), "points,who")
+  eq(combined:schema().points, "f64")
+  rows = combined:to_table()
+  eq(rows[1].who, "ana")
+  eq(rows[1].points, 10)
+  eq(rows[2].points, 20)
+  combined:close()
+end)
+test("ignore_errors keeps parsable rows and nulls failures", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,score,note\n1,10,ok\n2,oops,NA\n3,30,keep\n")
+  file:close()
+
+  local ok, err = pcall(polars.read_csv, path, {
+    dtypes = { score = "i64" },
+  })
+  eq(ok, false, "unparsable value accepted by default")
+  truthy(tostring(err):find("parse", 1, true),
+    "unparsable value error: " .. tostring(err))
+
+  local df = polars.read_csv(path, {
+    dtypes = { score = "i64" },
+    null_values = { note = "NA" },
+    ignore_errors = true,
+  })
+  eq(df:shape(), 3)
+  local rows = df:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[2].id, 2)
+  eq(rows[2].score, polars.null)
+  eq(rows[2].note, polars.null)
+  eq(rows[3].score, 30)
+  df:close()
+
+  local combined = polars.read_csv(path, {
+    ignore_errors = true,
+    columns = { "score", "id" },
+    dtypes = { score = "i64" },
+    n_rows = 3,
+    rename_columns = { "points", "row_id" },
+  })
+  eq(table.concat(combined:columns(), ","), "points,row_id")
+  rows = combined:to_table()
+  eq(rows[2].row_id, 2)
+  eq(rows[2].points, polars.null)
+  eq(rows[3].points, 30)
+  combined:close()
+end)
+test("lenient CSV options reject non-boolean values", function()
+  for _, key in ipairs({ "truncate_ragged_lines", "ignore_errors" }) do
+    for _, value in ipairs({ 1, 0, "true", {}, function() end }) do
+      local ok, err = pcall(polars.read_csv, fixture, { [key] = value })
+      eq(ok, false, key .. " accepted a non-boolean value")
+      truthy(tostring(err):find(key, 1, true),
+        "expected option name in: " .. tostring(err))
+      truthy(tostring(err):find("boolean", 1, true),
+        "expected boolean guidance in: " .. tostring(err))
+    end
+  end
+  local df = polars.read_csv(fixture, {
+    truncate_ragged_lines = false,
+    ignore_errors = false,
+  })
+  eq(df:shape(), 5)
+  df:close()
+end)
+
 test("select returns chosen columns in order", function()
   local df = polars.read_csv(fixture):select("name", "score")
   local rows, cols = df:shape()

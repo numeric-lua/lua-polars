@@ -38,8 +38,10 @@ end
   `f64`, `str`), `null_values` as a literal marker string or list of markers
   applied to every column, or a table mapping column names to one marker each,
   a `skip_rows`/`n_rows` window over the rows before and after the header,
-  `try_parse_dates = true` for ISO date/datetime inference, and
-  `encoding = "utf8-lossy"` for invalid UTF-8 input
+  `try_parse_dates = true` for ISO date/datetime inference,
+  `encoding = "utf8-lossy"` for invalid UTF-8 input,
+  `truncate_ragged_lines = true` to truncate rows wider than the header, and
+  `ignore_errors = true` to keep parsable rows when a value cannot be parsed
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, a literal `null_value` placeholder for null fields, a
   `line_terminator` of `"\n"` or `"\r\n"`, and a `quote_style` of
@@ -176,6 +178,8 @@ polars.read_csv(path, {
   null_values = { "NA", "missing" },
   encoding = "utf8-lossy",
   try_parse_dates = true,
+  truncate_ragged_lines = true,
+  ignore_errors = true,
   skip_rows = 1,
   n_rows = 100,
 })
