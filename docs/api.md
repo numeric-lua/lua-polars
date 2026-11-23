@@ -322,6 +322,30 @@ df:group_by("team", { 'sum("score") AS total' })
 
 Aggregate expressions are trusted SQL strings.
 
+### `df:value_counts(columns [, options]) -> DataFrame`
+
+Counts the distinct combinations of one or more key columns. The result keeps
+the keys in the requested order and appends a `count` column. By default rows
+are sorted by count descending, with ties ordered by the key columns for stable
+output. `columns` is a single name or a non-empty contiguous list and is
+required.
+
+`options` is an optional table:
+
+- `sort`: a boolean, default `true`. `false` returns the groups without an
+  `ORDER BY`.
+- `name`: the count column name, default `"count"`. It must be non-empty and
+  must not collide with a grouping key.
+
+```lua
+local by_team = df:value_counts("team")
+local by_team_active = df:value_counts({ "team", "active" })
+local unsorted = df:value_counts("team", { sort = false, name = "n" })
+```
+
+Unknown option keys, non-boolean `sort`, invalid or colliding names, empty,
+duplicate, unknown, or non-contiguous key lists, and closed frames are errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name

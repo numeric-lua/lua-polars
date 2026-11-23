@@ -54,8 +54,8 @@ end
   support the same array/lines formats
 - schema, shape, head/tail/slice, ordered columns, and `with_row_index`
 - SQL queries against the DataFrame registered as `df`
-- helpers for select, filter, sort, group-by, drop, rename, and with-columns
-  that preserve column order
+- helpers for select, filter, sort, group-by, `value_counts`, drop, rename,
+  and with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and raw `to_json()`, plus `read_json`/`write_json`
 - `drop_nulls([columns])` with an optional column subset, `fill_null(value
@@ -206,6 +206,7 @@ df:select("a", "b")
 df:filter('"a" > 3')
 df:sort("a", true)
 df:group_by("team", { 'sum("score") AS total' })
+df:value_counts("team")
 df:join(other, { on = "id", how = "full" })
 df:drop("unused")
 df:rename({ old = "new" })

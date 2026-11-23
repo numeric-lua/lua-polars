@@ -1123,6 +1123,85 @@ test("group_by helper", function()
   result:close()
 end)
 
+test("value_counts counts keys and sorts by count", function()
+  local df = polars.read_csv(fixture)
+  local counts = df:value_counts("team")
+  eq(counts:shape(), 2)
+  eq(table.concat(counts:columns(), ","), "team,count")
+  local rows = counts:to_table()
+  eq(rows[1].team, "red")
+  eq(rows[1].count, 3)
+  eq(rows[2].team, "blue")
+  eq(rows[2].count, 2)
+  counts:close()
+
+  local pair = df:value_counts({ "team", "active" })
+  eq(pair:shape(), 4)
+  eq(table.concat(pair:columns(), ","), "team,active,count")
+  rows = pair:to_table()
+  local red_true = find_row(rows, { team = "red", active = true })
+  eq(red_true.count, 2)
+  eq(find_row(rows, { team = "red", active = false }).count, 1)
+  eq(find_row(rows, { team = "blue", active = false }).count, 1)
+  eq(find_row(rows, { team = "blue", active = true }).count, 1)
+  pair:close()
+
+  local renamed = df:value_counts("active", { name = "n" })
+  eq(table.concat(renamed:columns(), ","), "active,n")
+  rows = renamed:to_table()
+  eq(rows[1].active, true)
+  eq(rows[1].n, 3)
+  renamed:close()
+  df:close()
+end)
+test("value_counts supports unsorted output", function()
+  local df = polars.read_csv(fixture)
+  local counts = df:value_counts("team", { sort = false })
+  eq(counts:shape(), 2)
+  local rows = counts:to_table()
+  eq(find_row(rows, { team = "red" }).count, 3)
+  eq(find_row(rows, { team = "blue" }).count, 2)
+  counts:close()
+  df:close()
+end)
+test("value_counts rejects invalid columns and options", function()
+  local df = polars.read_csv(fixture)
+  local column_cases = {
+    { nil, "columns must be a column name or a list of names" },
+    { 42, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "team", [3] = "active" }, "contiguous list" },
+    { { "team", "team" }, "duplicate value_counts column 'team'" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(column_cases) do
+    local ok, err = pcall(function() df:value_counts(case[1]) end)
+    eq(ok, false, "invalid value_counts columns accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local option_cases = {
+    { 42, "options must be a table" },
+    { { sorted = true }, "unknown field 'sorted'" },
+    { { sort = 1 }, "sort must be a boolean" },
+    { { name = 42 }, "name must be a non-empty string" },
+    { { name = "" }, "name must be a non-empty string" },
+    { { name = "team" }, "collides with a grouping column" },
+  }
+  for _, case in ipairs(option_cases) do
+    local ok, err = pcall(function()
+      df:value_counts("team", case[1])
+    end)
+    eq(ok, false, "invalid value_counts options accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:value_counts("team") end)
+  eq(ok, false, "closed value_counts accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed value_counts error")
+end)
+
 current = "columns"
 test("columns returns the frame's column order", function()
   local df = polars.read_csv(fixture)

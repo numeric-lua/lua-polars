@@ -736,6 +736,77 @@ function DataFrame:fill_null(value, columns)
   return self:sql("SELECT " .. table.concat(projections, ", ") .. " FROM df")
 end
 
+local VALUE_COUNT_OPTION_KEYS = {
+  sort = true,
+  name = true,
+}
+
+-- `sort` defaults to true, matching Polars value_counts. The count column can
+-- be renamed, but it must not collide with one of the grouping keys because
+-- the result is built from a single SELECT.
+local function value_count_options(options)
+  if options == nil then
+    return true, "count"
+  end
+  if type(options) ~= "table" then
+    error("value_counts options must be a table", 3)
+  end
+  for key in pairs(options) do
+    if not VALUE_COUNT_OPTION_KEYS[key] then
+      error("value_counts options: unknown field '" .. tostring(key) .. "'", 3)
+    end
+  end
+  local sort = options.sort
+  if sort == nil then
+    sort = true
+  end
+  if type(sort) ~= "boolean" then
+    error("value_counts sort must be a boolean", 3)
+  end
+  local name = options.name
+  if name == nil then
+    name = "count"
+  end
+  if type(name) ~= "string" or name == "" then
+    error("value_counts name must be a non-empty string", 3)
+  end
+  return sort, name
+end
+
+-- Counts the distinct combinations of the requested key columns. The count is
+-- appended after the keys and sorted descending by count when `sort` is true;
+-- ties are ordered by the key columns so repeated calls are deterministic.
+function DataFrame:value_counts(columns, options)
+  local keys = subset_columns(self, columns, "value_counts")
+  if keys == nil then
+    error("value_counts columns must be a column name or a list of names", 2)
+  end
+  local sort, name = value_count_options(options)
+  local quoted = {}
+  local grouped = {}
+  for _, key in ipairs(keys) do
+    local identifier = quote_identifier(key)
+    quoted[#quoted + 1] = identifier
+    grouped[key] = true
+  end
+  if grouped[name] then
+    error("value_counts name '" .. name ..
+      "' collides with a grouping column", 2)
+  end
+  local count = quote_identifier(name)
+  local query = "SELECT " .. table.concat(quoted, ", ") ..
+    ", COUNT(*) AS " .. count .. " FROM df GROUP BY " ..
+    table.concat(quoted, ", ")
+  if sort then
+    local order = { count .. " DESC" }
+    for _, identifier in ipairs(quoted) do
+      order[#order + 1] = identifier .. " ASC"
+    end
+    query = query .. " ORDER BY " .. table.concat(order, ", ")
+  end
+  return self:sql(query)
+end
+
 function DataFrame:write_csv(path, options)
   if options == nil then
     return write_frame(self, path, "pl_dataframe_write_csv")
