@@ -677,17 +677,61 @@ function DataFrame:drop_nulls(columns)
   return self:sql("SELECT * FROM df WHERE " .. table.concat(conditions, " AND "))
 end
 
-function DataFrame:fill_null(strategy)
-  strategy = strategy or "zero"
-  local fill = strategy == "zero" and 0 or strategy == "one" and 1 or nil
-  if fill == nil then
-    error("fill_null supports zero or one", 2)
+-- Formats a Lua scalar as a SQL literal for COALESCE. Strings are escaped by
+-- doubling single quotes, booleans use SQL true/false, and numbers must be
+-- finite so a typo cannot emit NaN or infinity into the query. `zero` and
+-- `one` stay reserved strategy aliases for backward compatibility.
+local function fill_null_literal(value)
+  if value == nil or value == "zero" then
+    return "0"
+  end
+  if value == "one" then
+    return "1"
+  end
+  if type(value) == "boolean" then
+    return value and "true" or "false"
+  end
+  if type(value) == "number" then
+    if value ~= value then
+      error("fill_null value must not be NaN", 3)
+    end
+    if value == math.huge or value == -math.huge then
+      error("fill_null value must be finite", 3)
+    end
+    return string.format("%.17g", value)
+  end
+  if type(value) == "string" then
+    if value:find("\0", 1, true) then
+      error("fill_null string must not contain NUL", 3)
+    end
+    return "'" .. value:gsub("'", "''") .. "'"
+  end
+  error("fill_null value must be zero, one, a finite number, a string, " ..
+    "or a boolean", 3)
+end
+
+-- With no columns every column is filled, matching the earlier behavior.
+-- A name or list limits the replacement to those columns. The scalar may be a
+-- finite number, string, or boolean; `zero` and `one` remain strategy aliases.
+function DataFrame:fill_null(value, columns)
+  local literal = fill_null_literal(value)
+  local selected = subset_columns(self, columns, "fill_null")
+  local wanted
+  if selected ~= nil then
+    wanted = {}
+    for _, name in ipairs(selected) do
+      wanted[name] = true
+    end
   end
   local projections = {}
   for _, name in ipairs(self:columns()) do
     local quoted = quote_identifier(name)
-    projections[#projections + 1] = "COALESCE(" .. quoted .. ", " ..
-      tostring(fill) .. ") AS " .. quoted
+    if wanted == nil or wanted[name] then
+      projections[#projections + 1] = "COALESCE(" .. quoted .. ", " ..
+        literal .. ") AS " .. quoted
+    else
+      projections[#projections + 1] = quoted
+    end
   end
   return self:sql("SELECT " .. table.concat(projections, ", ") .. " FROM df")
 end

@@ -263,6 +263,25 @@ local scored = df:drop_nulls("score")        -- only null scores
 local keyed = df:drop_nulls({ "id", "name" }) -- either key null
 ```
 
+### `df:fill_null(value [, columns]) -> DataFrame`
+
+Replaces nulls with a scalar, optionally only in the named columns. `value` may
+be a finite number, a string, or a boolean; `nil` and the strings `"zero"` and
+`"one"` keep the earlier strategy aliases for `0` and `1`. The value is
+formatted as a SQL literal, so string content is escaped and `"O'Reilly"`
+round-trips. `columns` is a single name or a non-empty contiguous list; when
+omitted every column is filled and unselected columns keep their nulls.
+
+```lua
+local labeled = df:fill_null("unknown", "note")
+local scored = df:fill_null(0, { "score", "bonus" })
+local flagged = df:fill_null(false, "active")
+```
+
+Non-finite numbers, NUL in a fill string, tables/functions, and malformed,
+unknown, or duplicate column subsets are errors. Type conflicts between the
+fill value and a column are reported by Polars.
+
 ### `df:sql(query) -> DataFrame`
 
 Runs a Polars SQL query with the current frame registered as table `df`. The

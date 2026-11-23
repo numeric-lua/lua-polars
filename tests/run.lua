@@ -2127,7 +2127,7 @@ test("drop_nulls and fill_null work on CSV nulls", function()
   eq(tostring(find_row(rows, { id = 3 }).note), "0")
   filled:close(); df:close()
   local bad = polars.read_csv(roundtrip_fixture)
-  local ok = pcall(function() bad:fill_null("nope") end)
+  local ok = pcall(function() bad:fill_null({}) end)
   eq(ok, false); bad:close()
 end)
 
@@ -2181,6 +2181,93 @@ test("drop_nulls rejects invalid subsets", function()
   local ok, err = pcall(function() df:drop_nulls("id") end)
   eq(ok, false, "closed drop_nulls accepted")
   truthy(tostring(err):find("closed", 1, true), "closed drop_nulls error")
+end)
+
+test("fill_null accepts literal values and a column subset", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local quoted = df:fill_null("O'Reilly", "note")
+  local rows = quoted:to_table()
+  eq(find_row(rows, { id = 3 }).note, "O'Reilly")
+  eq(find_row(rows, { id = 1 }).note, "hello, world")
+  eq(find_row(rows, { id = 2 }).note, 'say "hi"')
+  quoted:close()
+
+  local empty = df:fill_null("", "note")
+  eq(find_row(empty:to_table(), { id = 3 }).note, "")
+  empty:close()
+
+  local numeric = df:fill_null(42.5, { "id", "note" })
+  rows = numeric:to_table()
+  eq(find_row(rows, { id = 3 }).note, "42.5")
+  eq(find_row(rows, { id = 1 }).note, "hello, world")
+  eq(find_row(rows, { id = 1 }).id, 1)
+  numeric:close()
+
+  local scoped = polars.read_csv(null_fixture, {
+    null_values = { score = "9" },
+  })
+  local scored = scoped:fill_null(0, "score")
+  rows = scored:to_table()
+  eq(find_row(rows, { id = 5 }).score, 0)
+  eq(find_row(rows, { id = 1 }).score, 10)
+  eq(find_row(rows, { id = 3 }).note, polars.null)
+  scored:close()
+
+  local aliased = scoped:fill_null("zero", { "score" })
+  eq(find_row(aliased:to_table(), { id = 5 }).score, 0)
+  aliased:close()
+  scoped:close()
+  df:close()
+end)
+test("fill_null fills booleans and keeps unselected columns", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,active\n1,true\n2,\n3,false\n")
+  file:close()
+  local df = polars.read_csv(path)
+  eq(df:schema().active, "bool")
+  eq(df:to_table()[2].active, polars.null)
+  local filled = df:fill_null(false, "active")
+  local rows = filled:to_table()
+  eq(rows[1].active, true)
+  eq(rows[2].active, false)
+  eq(rows[3].active, false)
+  filled:close()
+  df:close()
+end)
+test("fill_null rejects invalid values and subsets", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local cases = {
+    { {}, "value must be zero, one, a finite number, a string, or a boolean" },
+    { function() end, "value must be zero, one" },
+    { 0 / 0, "must not be NaN" },
+    { math.huge, "must be finite" },
+    { -math.huge, "must be finite" },
+    { "a\0b", "must not contain NUL" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:fill_null(case[1]) end)
+    eq(ok, false, "invalid fill_null value accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local subset_cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "id", [3] = "note" }, "contiguous list" },
+    { { "id", "id" }, "duplicate fill_null column 'id'" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(subset_cases) do
+    local ok, err = pcall(function() df:fill_null(0, case[1]) end)
+    eq(ok, false, "invalid fill_null subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:fill_null(0) end)
+  eq(ok, false, "closed fill_null accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed fill_null error")
 end)
 
 test("row iteration and emptiness helpers", function()
