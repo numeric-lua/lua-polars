@@ -1,4 +1,4 @@
-# lua-polars API — 0.22.0
+# lua-polars API — 0.23.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.22.0"`).
+Returns the bridge version (`"0.23.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -197,6 +197,9 @@ Reads a Parquet file. With no options it reads every row and column.
 - `n_rows`: a non-negative integer, default unlimited. Limits the data rows
   read after `skip_rows`. `n_rows = 0` reads no rows while keeping the file
   schema; a window past the end returns an empty frame.
+- `low_memory`: a boolean, default `false`. `true` selects Polars' lower-memory
+  Parquet reader path, trading read speed for a smaller peak footprint. The
+  returned schema and values are unchanged.
 
 ```lua
 polars.read_parquet("data.parquet")
@@ -204,6 +207,7 @@ polars.read_parquet("data.parquet", {
   columns = { "score", "name" },
   skip_rows = 10,
   n_rows = 100,
+  low_memory = true,
 })
 ```
 
@@ -298,6 +302,23 @@ integer. Both arguments must be integers and at most `2^53 - 1` in magnitude.
 local page = df:slice(20, 10)
 local last_two = df:slice(-2, 2)
 ```
+
+### `df:take(indices) -> DataFrame`
+
+Returns rows at the requested positions. `indices` is a non-empty contiguous
+list of integers; positive values are 1-based and negative values count from
+the end (`-1` is the last row). Order and duplicates are preserved, and the
+result keeps the input schema. Every resolved position must be inside the
+frame.
+
+```lua
+local picked = df:take({ 2, 4 })
+local last_two = df:take({ -1, -2 })
+local repeated = df:take({ 5, 1, 5 })
+```
+
+An empty, non-contiguous, or non-list argument, zero, fractional, non-numeric,
+out-of-range, or above-`2^53 - 1` positions, and closed frames are errors.
 
 ### `df:with_row_index([name, offset]) -> DataFrame`
 
@@ -611,6 +632,30 @@ The condition is SQL, not a Lua expression; only pass trusted strings.
 `columns` is a name or list. `descending` is a boolean or a per-column list of
 booleans.
 
+### `df:top_k(k, columns) -> DataFrame`
+
+Returns the `k` largest rows ordered by one or more key columns, all descending,
+with null keys placed last. `k` must be a non-negative integer; `k = 0` returns
+an empty frame with the same schema, and a larger `k` returns every row. Ties
+are left to Polars. `columns` is a single name or a non-empty contiguous list.
+
+```lua
+local highest = df:top_k(5, "score")
+```
+
+### `df:bottom_k(k, columns) -> DataFrame`
+
+Returns the `k` smallest rows ordered by one or more key columns, all ascending,
+with null keys placed last. It uses the same count and column validation as
+`top_k`.
+
+```lua
+local lowest = df:bottom_k(5, { "score" })
+```
+
+Negative, fractional, non-numeric, or above-`2^53 - 1` counts, malformed,
+duplicate, empty, or unknown key lists, and closed frames are errors.
+
 ### `df:group_by(keys, aggregates) -> DataFrame`
 
 `keys` is a name or list; `aggregates` is a list of SQL aggregate expressions.
@@ -828,10 +873,22 @@ Unknown option keys and invalid types are errors, as are unsupported codec
 names, a non-positive or fractional chunk size, closed frames, non-string or
 empty paths, and write failures.
 
-### `df:to_json() -> string`
+### `df:to_json([options]) -> string`
 
-Row-oriented JSON array, one object per row. Non-JSON types are formatted by
-Polars' Arrow JSON writer.
+Row-oriented JSON. With no options it returns a JSON array with one object per
+row. `options` may set `format` to `"array"` (default; alias `"json"`) or
+`"lines"` (aliases `"ndjson"`, `"jsonl"`, `"json-lines"`, and `"jsonlines"`),
+matched case-insensitively. JSON Lines returns one object per line and is not
+valid JSON as a whole; read it back with `read_json(..., { format = "lines" })`.
+Non-JSON types are formatted by Polars' Arrow JSON writer.
+
+```lua
+local array = df:to_json()
+local lines = df:to_json({ format = "lines" })
+```
+
+Unknown option keys, non-string or unsupported formats, and closed frames are
+errors.
 
 ### `df:to_table() -> table`
 
@@ -969,6 +1026,9 @@ PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
     uint64_t skip_rows, int64_t n_rows, char **err);
+PlFrame *pl_dataframe_read_parquet_low_memory(
+    const char *path, const char *const *columns, uint64_t column_count,
+    uint64_t skip_rows, int64_t n_rows, int32_t low_memory, char **err);
 PlFrame *pl_dataframe_read_json(
     const char *path, int32_t json_lines,
     const char *const *columns, uint64_t column_count, char **err);
@@ -997,6 +1057,8 @@ PlFrame *pl_dataframe_gather_every(
     PlFrame *frame, uint64_t n, uint64_t offset, char **err);
 PlFrame *pl_dataframe_null_mask(
     PlFrame *frame, const char *name, char **err);
+PlFrame *pl_dataframe_take(
+    PlFrame *frame, const int64_t *indices, uint64_t count, char **err);
 PlFrame *pl_dataframe_cast(
     PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
 PlFrame *pl_dataframe_fill_nan(
@@ -1058,6 +1120,8 @@ int pl_dataframe_write_parquet_options(
 int pl_dataframe_write_json(
     PlFrame *frame, const char *path, int32_t json_lines, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
+char *pl_dataframe_to_json_format(
+    PlFrame *frame, int32_t json_lines, char **err);
 void pl_string_free(char *value);
 ```
 
@@ -1096,9 +1160,13 @@ numeric column (or only the borrowed explicit list) to the inclusive
 `[minimum, maximum]` range, preserves nulls, and rejects non-integral bounds on
 integer columns. `pl_dataframe_gather_every` returns rows `offset`, `offset+n`,
 and so on, with a positive `n` and a non-negative zero-based offset.
-`pl_dataframe_null_mask` appends a Boolean any-null row mask named by the
-borrowed `name` (or `has_nulls` for a null pointer) and rejects collisions and
-zero-column frames. `pl_dataframe_is_duplicated` and `pl_dataframe_is_unique`
+`pl_dataframe_take` resolves a borrowed array of signed indexes: negative
+values count from the end and every position must be in bounds. Order and
+duplicates are preserved, and a zero count returns an empty frame with the
+input schema. `pl_dataframe_null_mask` appends a Boolean any-null row mask
+named by the borrowed `name` (or `has_nulls` for a null pointer) and rejects
+collisions and zero-column frames. `pl_dataframe_is_duplicated` and
+`pl_dataframe_is_unique`
 append a Boolean marker column whose name is the borrowed `name` (or
 `duplicated`/`unique` for a null pointer) and reject collisions with existing
 columns. `pl_dataframe_cast` borrows `pair_count` `column`, `dtype` string pairs
@@ -1242,6 +1310,11 @@ drops that many leading data rows. `n_rows` limits the rows read after the
 offset: `-1` reads every remaining row and any other negative value is an
 error. `n_rows = 0` materializes an empty frame with the file schema.
 
+`pl_dataframe_read_parquet_low_memory` is additive and carries the same
+projection and row-window arguments as `pl_dataframe_read_parquet_options` plus
+`int32_t low_memory`. Non-zero selects Polars' lower-memory reader path; zero
+keeps the default. The schema and values are unchanged.
+
 `pl_dataframe_write_parquet_options` is additive; `pl_dataframe_write_parquet`
 keeps its signature and Zstd/statistics/default-chunking behavior. A null or
 empty `compression` keeps Zstd; the accepted names are `zstd`, `snappy`,
@@ -1266,11 +1339,16 @@ failure.
 positive value limits inference to that many records. JSON arrays are read as
 a whole, so the argument is validated but has no effect there.
 
+`pl_dataframe_to_json_format` is additive and serializes a frame as a JSON
+array when `json_lines` is zero or as one object per line otherwise. The
+returned string has the same Polars conventions as `pl_dataframe_to_json` and
+must be freed with `pl_string_free`.
+
 ## Install layouts
 
 ### LuaRocks source rock
 
-`lua-polars-0.22.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.23.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -1279,13 +1357,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.22.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.23.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.22.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.23.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
@@ -1333,6 +1411,8 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] DataFrame row shifting and numeric clipping.
 - [x] DataFrame row striding and null masks.
 - [x] Forward and backward null filling.
+- [x] Indexed row take and top/bottom k helpers.
+- [x] Parquet low-memory reads and JSON Lines string output.
 - [x] Duplicate and unique row markers.
 - [x] CSV and JSON schema-inference length control.
 - [x] Distinct rows with column subsets and keep strategies.

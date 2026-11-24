@@ -133,6 +133,9 @@ PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
     uint64_t skip_rows, int64_t n_rows, char **err);
+PlFrame *pl_dataframe_read_parquet_low_memory(
+    const char *path, const char *const *columns, uint64_t column_count,
+    uint64_t skip_rows, int64_t n_rows, int32_t low_memory, char **err);
 PlFrame *pl_dataframe_read_json(
     const char *path, int32_t json_lines,
     const char *const *columns, uint64_t column_count, char **err);
@@ -161,6 +164,8 @@ PlFrame *pl_dataframe_gather_every(
     PlFrame *frame, uint64_t n, uint64_t offset, char **err);
 PlFrame *pl_dataframe_null_mask(
     PlFrame *frame, const char *name, char **err);
+PlFrame *pl_dataframe_take(
+    PlFrame *frame, const int64_t *indices, uint64_t count, char **err);
 PlFrame *pl_dataframe_cast(
     PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
 PlFrame *pl_dataframe_fill_nan(
@@ -222,6 +227,8 @@ int pl_dataframe_write_parquet_options(
 int pl_dataframe_write_json(
     PlFrame *frame, const char *path, int32_t json_lines, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
+char *pl_dataframe_to_json_format(
+    PlFrame *frame, int32_t json_lines, char **err);
 void pl_string_free(char *value);
 ]]
 
@@ -1186,6 +1193,50 @@ function DataFrame:gather_every(n, offset)
   return new_frame(pointer, err)
 end
 
+local function take_index_list(value)
+  if type(value) ~= "table" then
+    error("take indices must be a non-empty contiguous list of integers", 2)
+  end
+  local keys = {}
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      error("take indices must be a non-empty contiguous list of integers", 2)
+    end
+    keys[#keys + 1] = key
+  end
+  if #keys == 0 then
+    error("take indices must not be empty", 2)
+  end
+  table.sort(keys)
+  for index, key in ipairs(keys) do
+    if key ~= index then
+      error("take indices must be a contiguous list", 2)
+    end
+  end
+  local indices = ffi.new("int64_t[?]", #keys)
+  for index = 1, #keys do
+    local value_at = value[index]
+    if type(value_at) ~= "number" or value_at % 1 ~= 0 or value_at == 0 or
+        value_at < -MAX_SAFE_INTEGER or value_at > MAX_SAFE_INTEGER then
+      error("take indices entries must be non-zero integers within the safe range", 2)
+    end
+    -- The Lua surface is 1-based; the bridge receives zero-based positions.
+    -- Negative values stay negative and count from the end with -1 as the last.
+    indices[index - 1] = value_at > 0 and value_at - 1 or value_at
+  end
+  return indices, #keys
+end
+
+-- Positive indices are 1-based. Negative indices count from the end (-1 is the
+-- last row). Order and duplicates are preserved, and every resolved index must
+-- be inside the frame.
+function DataFrame:take(indices)
+  local rows, count = take_index_list(indices)
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_take(self:_require_open(), rows, count, err)
+  return new_frame(pointer, err)
+end
+
 -- Appends a Boolean row mask that is true when any column in the row is null.
 -- The marker goes after the existing columns and does not change the input.
 function DataFrame:null_mask(name)
@@ -1373,7 +1424,22 @@ function DataFrame:write_json(path, options)
   return self
 end
 
-function DataFrame:to_json()
+function DataFrame:to_json(options)
+  if options ~= nil then
+    if type(options) ~= "table" then
+      error("to_json options must be a table", 2)
+    end
+    for key in pairs(options) do
+      if not JSON_WRITE_OPTION_KEYS[key] then
+        error("to_json options: unknown field '" .. tostring(key) .. "'", 2)
+      end
+    end
+    local format = json_format(options.format, "to_json")
+    local err = ffi.new("char *[1]")
+    local pointer = lib.pl_dataframe_to_json_format(self:_require_open(),
+      format == "lines" and 1 or 0, err)
+    return string_result(pointer, err)
+  end
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_to_json(self:_require_open(), err)
   return string_result(pointer, err)
@@ -1471,6 +1537,32 @@ function DataFrame:sort(columns, descending)
     quoted[index] = quote_identifier(name) .. (direction and " DESC" or " ASC")
   end
   return self:sql("SELECT * FROM df ORDER BY " .. table.concat(quoted, ", "))
+end
+
+local function rank_rows(self, k, columns, direction, label)
+  if type(k) ~= "number" or k < 0 or k % 1 ~= 0 or k > MAX_SAFE_INTEGER then
+    error(label .. " k must be a non-negative integer", 2)
+  end
+  local keys = subset_columns(self, columns, label)
+  if keys == nil then
+    error(label .. " columns must be a column name or a list of names", 2)
+  end
+  local order = {}
+  for index, name in ipairs(keys) do
+    order[index] = quote_identifier(name) .. " " .. direction .. " NULLS LAST"
+  end
+  return self:sql("SELECT * FROM df ORDER BY " .. table.concat(order, ", ") ..
+    " LIMIT " .. string.format("%d", k))
+end
+
+-- Keeps the k largest rows ordered by the requested keys, with null keys last.
+function DataFrame:top_k(k, columns)
+  return rank_rows(self, k, columns, "DESC", "top_k")
+end
+
+-- Keeps the k smallest rows ordered by the requested keys, with null keys last.
+function DataFrame:bottom_k(k, columns)
+  return rank_rows(self, k, columns, "ASC", "bottom_k")
 end
 
 function DataFrame:group_by(keys, aggregates)
@@ -1581,7 +1673,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.22.0",
+  _VERSION = "0.23.0",
   null = json.null,
   DataFrame = DataFrame,
 }
@@ -2133,11 +2225,12 @@ local PARQUET_READ_OPTION_KEYS = {
   columns = true,
   skip_rows = true,
   n_rows = true,
+  low_memory = true,
 }
 
 local function parquet_read_options(options)
   if options == nil then
-    return nil, 0, -1, false
+    return nil, 0, -1, false, nil
   end
   if type(options) ~= "table" then
     error("read_parquet options must be a table", 3)
@@ -2149,14 +2242,20 @@ local function parquet_read_options(options)
   end
   local columns = column_projection(options.columns, "read_parquet")
   local skip_rows, n_rows, requested = row_window(options, "read_parquet")
-  return columns, skip_rows, n_rows, requested or columns ~= nil
+  local low_memory = options.low_memory
+  if low_memory ~= nil and type(low_memory) ~= "boolean" then
+    error("read_parquet low_memory must be a boolean", 3)
+  end
+  return columns, skip_rows, n_rows,
+    requested or columns ~= nil or low_memory ~= nil, low_memory
 end
 
 function polars.read_parquet(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_parquet path must be a non-empty string", 2)
   end
-  local columns, skip_rows, n_rows, requested = parquet_read_options(options)
+  local columns, skip_rows, n_rows, requested, low_memory =
+    parquet_read_options(options)
   local err = ffi.new("char *[1]")
   local pointer
   if not requested then
@@ -2169,8 +2268,14 @@ function polars.read_parquet(path, options)
         names[index - 1] = name
       end
     end
-    pointer = lib.pl_dataframe_read_parquet_options(path, names,
-      names and #columns or 0, skip_rows, n_rows, err)
+    if low_memory ~= nil then
+      pointer = lib.pl_dataframe_read_parquet_low_memory(path, names,
+        names and #columns or 0, skip_rows, n_rows,
+        low_memory and 1 or 0, err)
+    else
+      pointer = lib.pl_dataframe_read_parquet_options(path, names,
+        names and #columns or 0, skip_rows, n_rows, err)
+    end
   end
   return new_frame(pointer, err)
 end

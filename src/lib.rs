@@ -1702,6 +1702,36 @@ unsafe fn read_parquet_columns(
     Ok(Some(columns))
 }
 
+fn read_parquet_frame(
+    path: &str,
+    columns: Option<Vec<String>>,
+    skip_rows: u64,
+    n_rows: i64,
+    low_memory: bool,
+) -> Result<DataFrame, String> {
+    let skip_rows: usize = skip_rows
+        .try_into()
+        .map_err(|_| "Parquet skip_rows is too large".to_string())?;
+    let length = if n_rows < 0 {
+        if n_rows != -1 {
+            return Err(format!(
+                "Parquet n_rows must be -1 or non-negative, got {n_rows}"
+            ));
+        }
+        usize::MAX - skip_rows
+    } else {
+        usize::try_from(n_rows).map_err(|_| "Parquet n_rows is too large".to_string())?
+    };
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut reader = ParquetReader::new(file)
+        .with_slice(Some((skip_rows, length)))
+        .set_low_memory(low_memory);
+    if let Some(columns) = columns {
+        reader = reader.with_columns(Some(columns));
+    }
+    reader.finish().map_err(|error| error.to_string())
+}
+
 /// Reads a Parquet file with a column projection and a row window.
 ///
 /// `columns` points to `column_count` UTF-8 names and is borrowed for the
@@ -1724,26 +1754,32 @@ pub unsafe extern "C" fn pl_dataframe_read_parquet_options(
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
         let path = read_path(path)?;
         let columns = read_parquet_columns(columns, column_count)?;
-        let skip_rows: usize = skip_rows
-            .try_into()
-            .map_err(|_| "Parquet skip_rows is too large".to_string())?;
-        let length = if n_rows < 0 {
-            if n_rows != -1 {
-                return Err(format!(
-                    "Parquet n_rows must be -1 or non-negative, got {n_rows}"
-                ));
-            }
-            usize::MAX - skip_rows
-        } else {
-            usize::try_from(n_rows)
-                .map_err(|_| "Parquet n_rows is too large".to_string())?
-        };
-        let file = File::open(&path).map_err(|error| error.to_string())?;
-        let mut reader = ParquetReader::new(file).with_slice(Some((skip_rows, length)));
-        if let Some(columns) = columns {
-            reader = reader.with_columns(Some(columns));
-        }
-        reader.finish().map_err(|error| error.to_string())
+        read_parquet_frame(&path, columns, skip_rows, n_rows, false)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a Parquet file with a projection, row window, and memory mode.
+///
+/// The arguments match [`pl_dataframe_read_parquet_options`] and keep the same
+/// projection and row-window rules. `low_memory` is non-zero to use Polars'
+/// lower-memory reader path, which trades speed for a smaller peak footprint.
+/// The returned frame has the same schema and values either way. This entry
+/// point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_parquet_low_memory(
+    path: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    low_memory: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let columns = read_parquet_columns(columns, column_count)?;
+        read_parquet_frame(&path, columns, skip_rows, n_rows, low_memory != 0)
     }));
     finish_frame(result, err)
 }
@@ -2403,6 +2439,59 @@ pub unsafe extern "C" fn pl_dataframe_gather_every(
     finish_frame(result, err)
 }
 
+/// Returns rows by zero-based or negative index.
+///
+/// `indices` points to `count` signed row indexes. A negative index counts
+/// from the end (`-1` is the last row); every resolved index must be inside the
+/// frame. Order and duplicates are preserved. A zero count returns an empty
+/// frame with the input schema. The input frame is unchanged. This entry point
+/// is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_take(
+    ptr: *mut PlFrame,
+    indices: *const i64,
+    count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let count: usize = count
+            .try_into()
+            .map_err(|_| "take index count is too large".to_string())?;
+        if count == 0 {
+            return Ok(frame.df.head(Some(0)));
+        }
+        if indices.is_null() {
+            return Err("take indices are null".to_string());
+        }
+        let height = i64::try_from(frame.df.height())
+            .map_err(|_| "DataFrame is too tall for take".to_string())?;
+        let raw = std::slice::from_raw_parts(indices, count);
+        let mut resolved = Vec::with_capacity(count);
+        for (position, &index) in raw.iter().enumerate() {
+            let row = if index < 0 {
+                index.checked_add(height)
+            } else {
+                Some(index)
+            };
+            let row = row.filter(|row| *row >= 0 && *row < height).ok_or_else(|| {
+                format!(
+                    "take index at position {} is out of bounds for {} rows: {index}",
+                    position + 1,
+                    height
+                )
+            })?;
+            resolved.push(row as IdxSize);
+        }
+        let resolved = IdxCa::from_vec(PlSmallStr::EMPTY, resolved);
+        frame
+            .df
+            .take(&resolved)
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 /// Appends a Boolean row mask that is true when any column is null.
 ///
 /// `name` is the appended column name; a null pointer keeps the default
@@ -2844,6 +2933,16 @@ pub unsafe extern "C" fn pl_dataframe_sql(
     finish_frame(result, err)
 }
 
+fn to_json_string(df: &DataFrame, format: JsonFormat) -> Result<String, String> {
+    let mut df = df.clone();
+    let mut buffer = Vec::new();
+    JsonWriter::new(&mut buffer)
+        .with_json_format(format)
+        .finish(&mut df)
+        .map_err(|error| error.to_string())?;
+    String::from_utf8(buffer).map_err(|error| error.to_string())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_to_json(
     ptr: *mut PlFrame,
@@ -2851,13 +2950,41 @@ pub unsafe extern "C" fn pl_dataframe_to_json(
 ) -> *mut c_char {
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<String, String> {
         let frame = frame_ref(ptr)?;
-        let mut df = frame.df.clone();
-        let mut buffer = Vec::new();
-        JsonWriter::new(&mut buffer)
-            .with_json_format(JsonFormat::Json)
-            .finish(&mut df)
-            .map_err(|error| error.to_string())?;
-        String::from_utf8(buffer).map_err(|error| error.to_string())
+        to_json_string(&frame.df, JsonFormat::Json)
+    }));
+    match result {
+        Ok(Ok(json)) => c_string(&json),
+        Ok(Err(message)) => {
+            set_error(err, message);
+            ptr::null_mut()
+        },
+        Err(payload) => {
+            set_error(err, panic_message(payload));
+            ptr::null_mut()
+        },
+    }
+}
+
+/// Serializes a frame as a JSON array or JSON Lines string.
+///
+/// `json_lines` is zero for the default array form and non-zero for one object
+/// per line. The returned string uses the same `polars` JSON conventions as
+/// [`pl_dataframe_to_json`] and must be freed with [`pl_string_free`]. This
+/// entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_to_json_format(
+    ptr: *mut PlFrame,
+    json_lines: i32,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<String, String> {
+        let frame = frame_ref(ptr)?;
+        let format = if json_lines != 0 {
+            JsonFormat::JsonLines
+        } else {
+            JsonFormat::Json
+        };
+        to_json_string(&frame.df, format)
     }));
     match result {
         Ok(Ok(json)) => c_string(&json),

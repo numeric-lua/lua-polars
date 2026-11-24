@@ -26,7 +26,7 @@ end
 
 ## Status
 
-`0.22.0` is an eager-first MVP:
+`0.23.0` is an eager-first MVP:
 
 - CSV, Parquet, and JSON readers and writers
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
@@ -52,8 +52,9 @@ end
   `"necessary"`, `"always"`, `"non_numeric"`, or `"never"`, a
   non-negative `float_precision` for float columns, `include_bom = true` for a
   UTF-8 byte-order mark, and `decimal_comma = true` for comma-decimal floats
-- Parquet reader options: a `columns` name/list projection and a
-  `skip_rows`/`n_rows` window that keeps the file schema for empty results
+- Parquet reader options: a `columns` name/list projection, a
+  `skip_rows`/`n_rows` window that keeps the file schema for empty results, and
+  `low_memory = true` for Polars' lower-memory reader path
 - Parquet writer options: a `compression` codec (`zstd`, `snappy`, `gzip`,
   `brotli`, `lz4`, `uncompressed`), `statistics = false` to skip column
   statistics, and positive `row_group_size`/`data_page_size` chunk controls
@@ -63,16 +64,18 @@ end
   writers support the same array/lines formats
 - schema, shape, head/tail/slice, ordered columns, and `with_row_index`
 - SQL queries against the DataFrame registered as `df`
-- helpers for select, filter, sort, group-by, `value_counts`, drop, rename,
-  and with-columns that preserve column order
+- helpers for select, filter, sort, `top_k`/`bottom_k`, group-by,
+  `value_counts`, drop, rename, and with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
-- row-oriented `to_table()` and raw `to_json()`, plus `read_json`/`write_json`
+- row-oriented `to_table()` and `to_json([options])` for arrays or JSON Lines,
+  plus `read_json`/`write_json`
 - `reverse()` for row order, `shift(periods [, columns])` for lag/lead and
   `clip(min, max [, columns])` for inclusive numeric bounds, `cast(mapping)` for
   strict column dtype changes, `unique([columns, options])` with subsets and
   first/last/none/any keep strategies, and `explode(columns [, options])` for
   list columns
-- `is_duplicated([name])`/`is_unique([name])` append a Boolean marker column
+- `take(indices)` selects rows by 1-based or negative position, while
+  `is_duplicated([name])`/`is_unique([name])` append a Boolean marker column
   for repeated or single-occurrence full rows, `null_mask([name])` appends a
   row-level any-null marker, and `gather_every(n [, offset])` returns a strided
   row window
@@ -126,14 +129,14 @@ files, read-time column projection, positional column renaming, dtype overrides,
 literal and per-column null markers, UTF-8 lossy decoding,
 skip-rows/row-limit windows, post-header row skipping, CSV/JSON schema-inference
 limits, decimal-comma numbers, CSV date inference and writer quote styles,
-empty-file reads, NaN fill/drop, shift/clip transforms, strided row windows,
-null masks, forward/backward null fills, duplicate and unique markers, writer
-delimiter/header/null/line-terminator options, UTF-8 BOM and decimal-comma
-output,
-Parquet column projections, row windows, compression codecs, statistics and
-chunk-size writer options, JSON array/JSON Lines round-trips, schema, head,
-tail, slice, row indexing, projection, row reversal, strict casting,
-subset distinct rows, list-column explode,
+empty-file reads, NaN fill/drop, shift/clip transforms, indexed row take,
+strided row windows, top/bottom k, null masks, forward/backward null fills,
+duplicate and unique markers, writer delimiter/header/null/line-terminator
+options, UTF-8 BOM and decimal-comma output,
+Parquet column projections, row windows, low-memory reads, compression codecs,
+statistics and chunk-size writer options, JSON array/JSON Lines round-trips and
+JSON Lines string output, schema, head, tail, slice, row indexing, projection,
+row reversal, strict casting, subset distinct rows, list-column explode,
 filtering, sorting, grouping, all eager join types, column operations, SQL,
 JSON conversion, and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
@@ -156,17 +159,17 @@ Lua loader also searches the directories on `package.cpath`, so no
 `POLARS_LUA_LIB` is needed.
 
 ```sh
-luarocks make lua-polars-0.22.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.23.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 For a clean checkout the first command compiles Polars; set
 `CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec and
-`scripts/build.sh` default to one job). The source URL points at the `v0.22.0`
+`scripts/build.sh` default to one job). The source URL points at the `v0.23.0`
 tag, which is created as part of the release: use `luarocks make` from a
 checkout before the tag exists, and
-`luarocks build lua-polars-0.22.0-1.rockspec` afterwards. Both use the same
+`luarocks build lua-polars-0.23.0-1.rockspec` afterwards. Both use the same
 build and install commands.
 
 ## Install into a prefix
@@ -220,6 +223,7 @@ polars.read_parquet(path, {
   columns = { "score", "name" },
   skip_rows = 10,
   n_rows = 100,
+  low_memory = true,
 })
 polars.read_json(path)
 polars.read_json(path, {
@@ -234,6 +238,8 @@ df:columns()              -- ordered column names
 df:head(n)
 df:tail(n)
 df:slice(offset, length)
+df:take({ 2, 4 })
+df:take({ -1, -2 })
 df:with_row_index("row_id", 100)
 df:reverse()
 df:shift(1, "score")
@@ -253,6 +259,8 @@ df:sql(query)
 df:select("a", "b")
 df:filter('"a" > 3')
 df:sort("a", true)
+df:top_k(5, "score")
+df:bottom_k(5, "score")
 df:group_by("team", { 'sum("score") AS total' })
 df:value_counts("team")
 df:join(other, { on = "id", how = "full" })
@@ -281,6 +289,7 @@ df:write_json("out.json")
 df:write_json("out.jsonl", { format = "lines" })
 df:to_table()
 df:to_json()
+df:to_json({ format = "lines" })
 df:close()
 ```
 

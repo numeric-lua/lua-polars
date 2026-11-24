@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.23.0
+
+- five DataFrame/IO additions:
+  - `df:take(indices)` returns rows by a non-empty contiguous list of 1-based
+    positions, with negative positions counting from the end; order and
+    duplicates are preserved;
+  - `df:top_k(k, columns)` keeps the `k` largest rows using descending key
+    order with null keys last;
+  - `df:bottom_k(k, columns)` keeps the `k` smallest rows using ascending key
+    order with null keys last;
+  - `polars.read_parquet(..., { low_memory = true })` selects Polars'
+    lower-memory reader path without changing the schema or values;
+  - `df:to_json({ format = "lines" })` returns JSON Lines text while the
+    no-option call keeps the existing JSON array and `to_table()` contract;
+- the additive C ABI entry points are `pl_dataframe_take`,
+  `pl_dataframe_read_parquet_low_memory`, and
+  `pl_dataframe_to_json_format`; every earlier signature and default is
+  unchanged, and `top_k`/`bottom_k` are built on the existing SQL entry point;
+- validation covers empty, non-contiguous, malformed, zero, fractional,
+  non-numeric, out-of-range, and above-`2^53 - 1` take positions, invalid rank
+  counts and key lists, non-boolean `low_memory`, unknown `to_json` options and
+  formats, and closed frames;
+- tests cover positive/negative/repeated take positions, top/bottom ordering
+  with null keys and empty/past-end counts, JSON Lines output and array
+  round-trips, Parquet low-memory projections and windows, and every new error
+  path, including the installed-prefix smoke test;
+- `./scripts/test.sh` passed 178 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validate the installed-prefix and LuaRocks layouts
+  for 0.23.0-1;
+- the 0.23.0 tag is created for this release.
+
 ## 0.22.0
 
 - five DataFrame/IO additions:

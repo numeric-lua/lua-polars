@@ -85,10 +85,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.22.0")
+  eq(polars.version(), "0.23.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.22.0")
+  eq(polars._VERSION, "0.23.0")
 end)
 
 current = "csv"
@@ -3571,6 +3571,232 @@ test("read_json infer_schema_length rejects invalid values and mismatches", func
   truthy(tostring(err):find("parse", 1, true) or
     tostring(err):find("Int64", 1, true),
     "inference mismatch error: " .. tostring(err))
+end)
+
+test("take selects rows in the requested order", function()
+  local df = polars.read_csv(fixture)
+  local picked = df:take({ 2, 4 })
+  eq(picked:shape(), 2)
+  eq(table.concat(picked:columns(), ","), "name,team,score,active")
+  eq(picked:schema().score, "i64")
+  local rows = picked:to_table()
+  eq(rows[1].name, "bia")
+  eq(rows[1].score, 7)
+  eq(rows[2].name, "duda")
+  picked:close()
+
+  local negative = df:take({ -1, -2 })
+  eq(negative:shape(), 2)
+  rows = negative:to_table()
+  eq(rows[1].name, "eva")
+  eq(rows[2].name, "duda")
+  negative:close()
+
+  local repeated = df:take({ 5, 1, 5 })
+  eq(repeated:shape(), 3)
+  rows = repeated:to_table()
+  eq(rows[1].name, "eva")
+  eq(rows[2].name, "ana")
+  eq(rows[3].name, "eva")
+  repeated:close()
+  eq(df:to_table()[1].name, "ana", "take changed the input frame")
+  df:close()
+end)
+
+test("take rejects invalid index lists", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { 42, "non-empty contiguous list" },
+    { "1", "non-empty contiguous list" },
+    { {}, "must not be empty" },
+    { { [1] = 1, [3] = 3 }, "contiguous list" },
+    { { 1, 1.5 }, "non-zero integers" },
+    { { "1" }, "non-zero integers" },
+    { { 0 }, "non-zero integers" },
+    { { 6 }, "out of bounds" },
+    { { -6 }, "out of bounds" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:take(case[1]) end)
+    eq(ok, false, "invalid take index list accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:take({ 1 }) end)
+  eq(ok, false, "closed take accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed take error")
+end)
+
+test("top_k and bottom_k keep ordered extremes", function()
+  local df = polars.read_csv(fixture)
+  local top = df:top_k(3, "score")
+  eq(top:shape(), 3)
+  eq(table.concat(top:columns(), ","), "name,team,score,active")
+  local rows = top:to_table()
+  eq(rows[1].name, "caio")
+  eq(rows[2].name, "ana")
+  eq(rows[3].name, "eva")
+  top:close()
+
+  local bottom = df:bottom_k(3, { "score" })
+  eq(bottom:shape(), 3)
+  rows = bottom:to_table()
+  eq(rows[1].name, "duda")
+  eq(rows[2].name, "bia")
+  eq(rows[3].name, "eva")
+  bottom:close()
+
+  local empty = df:top_k(0, "score")
+  eq(empty:shape(), 0)
+  eq(table.concat(empty:columns(), ","), "name,team,score,active")
+  empty:close()
+
+  local all = df:bottom_k(100, "score")
+  eq(all:shape(), df:shape())
+  all:close()
+
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,score\n1,\n2,5\n3,9\n")
+  file:close()
+  local nullable = polars.read_csv(path)
+  local high = nullable:top_k(3, "score")
+  rows = high:to_table()
+  eq(rows[1].score, 9)
+  eq(rows[2].score, 5)
+  eq(rows[3].score, polars.null)
+  high:close()
+  local low = nullable:bottom_k(3, "score")
+  rows = low:to_table()
+  eq(rows[1].score, 5)
+  eq(rows[2].score, 9)
+  eq(rows[3].score, polars.null)
+  low:close()
+  nullable:close()
+  eq(df:to_table()[1].name, "ana", "rank helper changed the input frame")
+  df:close()
+end)
+
+test("top_k and bottom_k reject invalid counts and keys", function()
+  local df = polars.read_csv(fixture)
+  for _, value in ipairs({ -1, 1.5, "1", true, {}, math.huge,
+      9007199254740992 }) do
+    local ok, err = pcall(function() df:top_k(value, "score") end)
+    eq(ok, false, "invalid top_k count accepted")
+    truthy(tostring(err):find("non-negative integer", 1, true),
+      "top_k count error: " .. tostring(err))
+    ok, err = pcall(function() df:bottom_k(value, "score") end)
+    eq(ok, false, "invalid bottom_k count accepted")
+    truthy(tostring(err):find("non-negative integer", 1, true),
+      "bottom_k count error: " .. tostring(err))
+  end
+  local key_cases = {
+    { 42, "columns must be a column name" },
+    { {}, "columns must not be empty" },
+    { { [1] = "score", [3] = "active" }, "contiguous list" },
+    { { "score", "score" }, "duplicate" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(key_cases) do
+    local ok, err = pcall(function() df:top_k(1, case[1]) end)
+    eq(ok, false, "invalid top_k keys accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+    ok, err = pcall(function() df:bottom_k(1, case[1]) end)
+    eq(ok, false, "invalid bottom_k keys accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:top_k(1) end)
+  eq(ok, false, "top_k accepted missing keys")
+  truthy(tostring(err):find("columns must be a column name", 1, true),
+    "top_k missing keys error: " .. tostring(err))
+  ok, err = pcall(function() df:bottom_k(1) end)
+  eq(ok, false, "bottom_k accepted missing keys")
+  truthy(tostring(err):find("columns must be a column name", 1, true),
+    "bottom_k missing keys error: " .. tostring(err))
+  df:close()
+  local ok, err = pcall(function() df:top_k(1, "score") end)
+  eq(ok, false, "closed top_k accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed top_k error")
+  ok, err = pcall(function() df:bottom_k(1, "score") end)
+  eq(ok, false, "closed bottom_k accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed bottom_k error")
+end)
+
+test("to_json supports JSON Lines output", function()
+  local df = polars.read_csv(fixture)
+  local array = df:to_json()
+  truthy(array:sub(1, 1) == "[", "default to_json is not an array")
+  truthy(array:find('"name":"ana"', 1, true), "default to_json row")
+
+  local lines = df:to_json({ format = "lines" })
+  truthy(lines:sub(1, 1) == "{", "JSON Lines output starts with an object")
+  truthy(not lines:find("[", 1, true), "JSON Lines output has an array bracket")
+  local count = 0
+  for line in lines:gmatch("[^\n]+") do
+    count = count + 1
+    truthy(line:sub(1, 1) == "{", "JSON Lines record is not an object")
+  end
+  eq(count, 5)
+
+  local alias = df:to_json({ format = "ndjson" })
+  eq(alias, lines, "ndjson alias differs from lines output")
+  local empty_options = df:to_json({})
+  eq(empty_options, array, "empty to_json options changed the format")
+
+  local path = new_temp_path(".jsonl")
+  local file = assert(io.open(path, "w"))
+  file:write(lines)
+  file:close()
+  local loaded = polars.read_json(path, { format = "lines" })
+  eq(loaded:shape(), df:shape())
+  eq(loaded:to_table()[1].name, "ana")
+  loaded:close()
+
+  local ok, err = pcall(function() df:to_json({ format = 42 }) end)
+  eq(ok, false, "non-string to_json format accepted")
+  truthy(tostring(err):find("format", 1, true), "to_json format error")
+  ok, err = pcall(function() df:to_json({ rows = 1 }) end)
+  eq(ok, false, "unknown to_json option accepted")
+  truthy(tostring(err):find("unknown field", 1, true), "to_json option error")
+  df:close()
+  ok, err = pcall(function() df:to_json() end)
+  eq(ok, false, "closed to_json accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed to_json error")
+end)
+
+test("read_parquet low_memory preserves results", function()
+  local df = polars.read_csv(fixture)
+  local path = new_temp_path(".parquet")
+  df:write_parquet(path, { compression = "snappy" })
+  local default = polars.read_parquet(path)
+  local low = polars.read_parquet(path, { low_memory = true })
+  eq(low:shape(), default:shape())
+  eq(table.concat(low:columns(), ","), table.concat(default:columns(), ","))
+  eq(low:schema().score, default:schema().score)
+  eq(low:to_table()[1].name, default:to_table()[1].name)
+  eq(low:to_table()[3].score, default:to_table()[3].score)
+  low:close()
+  default:close()
+
+  local windowed = polars.read_parquet(path, {
+    low_memory = false,
+    columns = { "score", "name" },
+    skip_rows = 1,
+    n_rows = 2,
+  })
+  eq(windowed:shape(), 2)
+  eq(table.concat(windowed:columns(), ","), "score,name")
+  eq(windowed:to_table()[1].name, "bia")
+  windowed:close()
+
+  local ok, err = pcall(polars.read_parquet, path, { low_memory = "true" })
+  eq(ok, false, "non-boolean low_memory accepted")
+  truthy(tostring(err):find("low_memory", 1, true),
+    "low_memory option error: " .. tostring(err))
+  df:close()
 end)
 
 cleanup_temp_files()
