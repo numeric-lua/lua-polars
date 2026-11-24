@@ -1,37 +1,35 @@
-# lua-polars 0.21.0
+# lua-polars 0.22.0
 
-Five DataFrame/IO additions, all additive over the 0.20.0 surface:
+Five DataFrame/IO additions, all additive over the 0.21.0 surface:
 
-- `df:shift(periods [, columns])` shifts values by a row count. Positive
-  periods move values toward later rows and insert nulls at the start; negative
-  periods move them toward earlier rows and insert nulls at the end. Every
-  column shifts by default, or a validated name/list restricts the operation
-  and leaves the other columns untouched. Column names, order, dtypes, and the
-  input frame are preserved.
-- `df:clip(minimum, maximum [, columns])` clamps numeric values to an inclusive
-  finite range. Nulls are preserved, and column order is unchanged. With no
-  column argument every primitive numeric column is clipped; an explicit subset
-  must name numeric columns. Non-integral bounds on integer columns are
-  rejected instead of being silently truncated.
-- `df:is_duplicated([name])` appends a Boolean column that is true for every
-  full row value that occurs more than once. The default name is `duplicated`;
-  a custom name must be non-empty and must not collide with an existing column.
-- `df:is_unique([name])` appends the inverse Boolean marker for rows that occur
-  exactly once. The default name is `unique`, with the same collision rules.
-- `polars.read_csv(..., { infer_schema_length = n })` controls how many data
-  rows are used to infer dtypes. The default remains Polars' 100-row window;
-  `0` reads every column as a string, and a positive value sets a different
-  window. Explicit `dtypes` overrides still win, and the option composes with
-  every earlier reader option.
+- `df:fill_null_forward([columns])` replaces each null with the previous
+  non-null value in the same column. Leading nulls stay null; with no argument
+  every column is filled, or a validated name/list restricts the fill. Column
+  order, dtypes, and the input frame are preserved.
+- `df:fill_null_backward([columns])` carries the next non-null value into each
+  null, leaving trailing nulls in place. It uses the same all-column default
+  and validated subset rules as the forward direction.
+- `df:gather_every(n [, offset])` returns every `n`th row starting at the
+  zero-based `offset` (default `0`). The schema is preserved, `n` must be
+  positive, and an offset at or past the end returns an empty frame.
+- `df:null_mask([name])` appends a Boolean column that is true when any column
+  in the row is null. The default name is `has_nulls`; a custom name must be
+  non-empty and must not collide with an existing column. A zero-column frame
+  has no values to test and is rejected.
+- `polars.read_json(..., { infer_schema_length = n })` controls schema
+  inference for JSON Lines. The default remains Polars' 100-record window, `0`
+  scans the whole stream, and a positive value limits the window. JSON arrays
+  are read as a whole, so the option is accepted but has no effect there.
 
-The additive C ABI entry points are `pl_dataframe_shift`,
-`pl_dataframe_clip`, `pl_dataframe_is_duplicated`, `pl_dataframe_is_unique`,
-and `pl_dataframe_read_csv_inferred`; every earlier entry point keeps its
-signature and defaults. Validation covers non-integer shift periods, malformed,
-empty, duplicate, unknown, or non-contiguous subsets, non-finite or reversed
-clip bounds, fractional integer clip bounds, non-numeric explicit clip columns,
-empty, non-string, or colliding marker names, invalid inference lengths, closed
-frames, and filesystem/parse errors. The test suite covers all five additions,
-and the installed prefix and LuaRocks layouts are exercised through
-`./scripts/test.sh`, `./scripts/smoke.sh`, and `./scripts/rockspec.sh`.
-This release is tagged `v0.21.0`.
+The additive C ABI entry points are `pl_dataframe_fill_null_forward`,
+`pl_dataframe_fill_null_backward`, `pl_dataframe_gather_every`,
+`pl_dataframe_null_mask`, and `pl_dataframe_read_json_inferred`; every earlier
+entry point keeps its signature and defaults. Validation covers malformed,
+empty, duplicate, unknown, or non-contiguous fill subsets, zero, negative,
+fractional, non-numeric, or above-`2^53 - 1` gather counts and offsets,
+empty, non-string, or colliding null-mask names, zero-column frames, invalid
+JSON inference lengths, closed frames, and filesystem/parse errors. The test
+suite covers all five additions, and the installed prefix and LuaRocks layouts
+are exercised through `./scripts/test.sh`, `./scripts/smoke.sh`, and
+`./scripts/rockspec.sh`.
+This release is tagged `v0.22.0`.

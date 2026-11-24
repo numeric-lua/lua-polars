@@ -1,4 +1,4 @@
-# lua-polars API — 0.21.0
+# lua-polars API — 0.22.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.21.0"`).
+Returns the bridge version (`"0.22.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -225,18 +225,25 @@ single JSON array.
 - `columns`: a column name or a non-empty list of names to read. The returned
   frame keeps the requested order and contains only those columns. Unknown,
   duplicate, and empty names are errors.
+- `infer_schema_length`: a non-negative integer controlling JSON Lines schema
+  inference. The default keeps Polars' 100-record window; `0` scans the whole
+  stream, and a positive value limits inference to that many records. JSON
+  arrays are read as a whole by Polars, so the option is accepted but has no
+  effect there. It must be at most `2^53 - 1`.
 
 ```lua
 local rows = polars.read_json("rows.json")
 local events = polars.read_json("events.jsonl", {
   format = "lines",
   columns = { "time", "event" },
+  infer_schema_length = 0,
 })
 ```
 
 Unknown option keys and invalid types are errors, as are a missing or
-unreadable path, malformed JSON, unknown projection names, and files whose top
-level is not a supported array or object stream.
+unreadable path, malformed JSON, unknown projection names, invalid
+`infer_schema_length`, and files whose top level is not a supported array or
+object stream.
 
 ### `polars.null`
 
@@ -452,6 +459,34 @@ Non-finite numbers, NUL in a fill string, tables/functions, and malformed,
 unknown, or duplicate column subsets are errors. Type conflicts between the
 fill value and a column are reported by Polars.
 
+### `df:fill_null_forward([columns]) -> DataFrame`
+
+Replaces each null with the previous non-null value in the same column. Leading
+nulls stay null because no previous value exists. With no argument every column
+is filled; a single name or a non-empty contiguous list restricts the fill and
+leaves unselected columns untouched. The input frame is unchanged and column
+order is preserved.
+
+```lua
+local ordered = df:fill_null_forward()
+local note = df:fill_null_forward("note")
+local paired = df:fill_null_forward({ "note", "score" })
+```
+
+### `df:fill_null_backward([columns]) -> DataFrame`
+
+Replaces each null with the next non-null value in the same column. Trailing
+nulls stay null because no following value exists. It uses the same optional
+all-column default and validated subsets as `fill_null_forward`.
+
+```lua
+local ordered = df:fill_null_backward()
+local note = df:fill_null_backward("note")
+```
+
+Malformed, duplicate, empty, or unknown column subsets and closed frames are
+errors for both directions.
+
 ### `df:fill_nan(value [, columns]) -> DataFrame`
 
 Replaces floating-point NaN values with a finite scalar. NaN is a separate
@@ -487,6 +522,37 @@ local paired = df:drop_nans({ "score", "bonus" })
 ```
 
 Unknown, duplicate, empty, or non-contiguous column subsets and closed frames
+are errors.
+
+### `df:gather_every(n [, offset]) -> DataFrame`
+
+Returns every `n`th row starting at the zero-based `offset`, which defaults to
+`0`. The result keeps the column names, order, and dtypes of the input; an
+offset at or past the frame height returns an empty frame with the same schema.
+`n` must be a positive integer, and `offset` must be a non-negative integer.
+
+```lua
+local every_other = df:gather_every(2)
+local odd_rows = df:gather_every(2, 1)
+```
+
+Zero, negative, fractional, non-numeric, or above-`2^53 - 1` counts and
+offsets, and closed frames are errors.
+
+### `df:null_mask([name]) -> DataFrame`
+
+Returns a new frame with a Boolean row mask appended after the existing
+columns. The mask is `true` when any column in that row is null. `name`
+defaults to `"has_nulls"` and must be a non-empty string that does not collide
+with an existing column. A zero-column frame has no values to test and is an
+error; the input frame is unchanged.
+
+```lua
+local flagged = df:null_mask()
+local custom = df:null_mask("has_holes")
+```
+
+Empty, non-string, or colliding names, zero-column frames, and closed frames
 are errors.
 
 ### `df:is_duplicated([name]) -> DataFrame`
@@ -906,6 +972,10 @@ PlFrame *pl_dataframe_read_parquet_options(
 PlFrame *pl_dataframe_read_json(
     const char *path, int32_t json_lines,
     const char *const *columns, uint64_t column_count, char **err);
+PlFrame *pl_dataframe_read_json_inferred(
+    const char *path, int32_t json_lines,
+    const char *const *columns, uint64_t column_count,
+    int64_t infer_schema_length, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
@@ -923,12 +993,22 @@ PlFrame *pl_dataframe_shift(
 PlFrame *pl_dataframe_clip(
     PlFrame *frame, double minimum, double maximum, const char *const *columns,
     uint64_t column_count, char **err);
+PlFrame *pl_dataframe_gather_every(
+    PlFrame *frame, uint64_t n, uint64_t offset, char **err);
+PlFrame *pl_dataframe_null_mask(
+    PlFrame *frame, const char *name, char **err);
 PlFrame *pl_dataframe_cast(
     PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
 PlFrame *pl_dataframe_fill_nan(
     PlFrame *frame, double value, const char *const *columns,
     uint64_t column_count, char **err);
 PlFrame *pl_dataframe_drop_nans(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    char **err);
+PlFrame *pl_dataframe_fill_null_forward(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    char **err);
+PlFrame *pl_dataframe_fill_null_backward(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     char **err);
 PlFrame *pl_dataframe_is_duplicated(
@@ -1014,7 +1094,11 @@ null/zero count shifts every column, a positive `periods` inserts leading nulls,
 and a negative value inserts trailing nulls. `pl_dataframe_clip` clamps every
 numeric column (or only the borrowed explicit list) to the inclusive
 `[minimum, maximum]` range, preserves nulls, and rejects non-integral bounds on
-integer columns. `pl_dataframe_is_duplicated` and `pl_dataframe_is_unique`
+integer columns. `pl_dataframe_gather_every` returns rows `offset`, `offset+n`,
+and so on, with a positive `n` and a non-negative zero-based offset.
+`pl_dataframe_null_mask` appends a Boolean any-null row mask named by the
+borrowed `name` (or `has_nulls` for a null pointer) and rejects collisions and
+zero-column frames. `pl_dataframe_is_duplicated` and `pl_dataframe_is_unique`
 append a Boolean marker column whose name is the borrowed `name` (or
 `duplicated`/`unique` for a null pointer) and reject collisions with existing
 columns. `pl_dataframe_cast` borrows `pair_count` `column`, `dtype` string pairs
@@ -1031,6 +1115,10 @@ non-empty list is validated against the frame. `pl_dataframe_drop_nans` filters
 out rows with a NaN in any targeted float column and keeps nulls. Both ignore
 non-float columns in a subset, borrow their name arrays for the call, and
 return a newly owned frame while leaving the input open.
+`pl_dataframe_fill_null_forward` and `pl_dataframe_fill_null_backward` carry
+the previous or next non-null value into each null; leading/trailing nulls
+remain null, an empty column list targets every column, and explicit subsets are
+validated and applied independently while preserving column order.
 
 `pl_dataframe_write_csv_precise` is additive and carries every option from
 `pl_dataframe_write_csv_configured` plus `int64_t float_precision`, where `-1`
@@ -1172,11 +1260,17 @@ the requested order. `pl_dataframe_write_json` writes the same two formats from
 an open frame and returns zero on success or non-zero with `err` set on
 failure.
 
+`pl_dataframe_read_json_inferred` is additive and carries every argument from
+`pl_dataframe_read_json` plus `int64_t infer_schema_length`. For JSON Lines,
+`-1` keeps Polars' default 100-record window, `0` scans the whole stream, and a
+positive value limits inference to that many records. JSON arrays are read as
+a whole, so the argument is validated but has no effect there.
+
 ## Install layouts
 
 ### LuaRocks source rock
 
-`lua-polars-0.21.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.22.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -1185,13 +1279,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.21.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.22.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.21.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.22.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
@@ -1237,8 +1331,10 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] DataFrame NaN filling and dropping with column subsets.
 - [x] DataFrame row reversal and strict column casting.
 - [x] DataFrame row shifting and numeric clipping.
+- [x] DataFrame row striding and null masks.
+- [x] Forward and backward null filling.
 - [x] Duplicate and unique row markers.
-- [x] CSV schema-inference length control.
+- [x] CSV and JSON schema-inference length control.
 - [x] Distinct rows with column subsets and keep strategies.
 - [x] List-column explode with null/empty-list controls.
 - [x] CSV writer delimiter, header, and null-value options.

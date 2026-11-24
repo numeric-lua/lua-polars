@@ -136,6 +136,10 @@ PlFrame *pl_dataframe_read_parquet_options(
 PlFrame *pl_dataframe_read_json(
     const char *path, int32_t json_lines,
     const char *const *columns, uint64_t column_count, char **err);
+PlFrame *pl_dataframe_read_json_inferred(
+    const char *path, int32_t json_lines,
+    const char *const *columns, uint64_t column_count,
+    int64_t infer_schema_length, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
@@ -153,12 +157,22 @@ PlFrame *pl_dataframe_shift(
 PlFrame *pl_dataframe_clip(
     PlFrame *frame, double minimum, double maximum, const char *const *columns,
     uint64_t column_count, char **err);
+PlFrame *pl_dataframe_gather_every(
+    PlFrame *frame, uint64_t n, uint64_t offset, char **err);
+PlFrame *pl_dataframe_null_mask(
+    PlFrame *frame, const char *name, char **err);
 PlFrame *pl_dataframe_cast(
     PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
 PlFrame *pl_dataframe_fill_nan(
     PlFrame *frame, double value, const char *const *columns,
     uint64_t column_count, char **err);
 PlFrame *pl_dataframe_drop_nans(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    char **err);
+PlFrame *pl_dataframe_fill_null_forward(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    char **err);
+PlFrame *pl_dataframe_fill_null_backward(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     char **err);
 PlFrame *pl_dataframe_is_duplicated(
@@ -1017,6 +1031,36 @@ function DataFrame:fill_null(value, columns)
   return self:sql("SELECT " .. table.concat(projections, ", ") .. " FROM df")
 end
 
+local function fill_null_direction(frame, columns, label, method)
+  local selected = subset_columns(frame, columns, label)
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib[method](frame:_require_open(), names, count, err)
+  return new_frame(pointer, err)
+end
+
+-- Forward fill carries the previous non-null value into each null. Leading
+-- nulls stay null because there is no earlier value to carry.
+function DataFrame:fill_null_forward(columns)
+  return fill_null_direction(self, columns, "fill_null_forward",
+    "pl_dataframe_fill_null_forward")
+end
+
+-- Backward fill carries the next non-null value into each null. Trailing
+-- nulls stay null because there is no later value to carry.
+function DataFrame:fill_null_backward(columns)
+  return fill_null_direction(self, columns, "fill_null_backward",
+    "pl_dataframe_fill_null_backward")
+end
+
 -- NaN is distinct from null: a CSV null or a SQL NULL is left alone, while a
 -- floating-point NaN is replaced. Only Float32/Float64 columns can carry NaN;
 -- a selected non-float column is simply unchanged.
@@ -1121,6 +1165,36 @@ function DataFrame:clip(minimum, maximum, columns)
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_clip(self:_require_open(), minimum, maximum,
     names, count, err)
+  return new_frame(pointer, err)
+end
+
+-- Positive n keeps rows offset, offset+n, offset+2n, and so on. offset
+-- defaults to 0 and is a zero-based row index; an offset past the end returns
+-- an empty frame with the same schema.
+function DataFrame:gather_every(n, offset)
+  if type(n) ~= "number" or n < 1 or n % 1 ~= 0 or n > MAX_SAFE_INTEGER then
+    error("gather_every n must be a positive integer", 2)
+  end
+  offset = offset == nil and 0 or offset
+  if type(offset) ~= "number" or offset < 0 or offset % 1 ~= 0 or
+      offset > MAX_SAFE_INTEGER then
+    error("gather_every offset must be a non-negative integer", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_gather_every(self:_require_open(), n, offset,
+    err)
+  return new_frame(pointer, err)
+end
+
+-- Appends a Boolean row mask that is true when any column in the row is null.
+-- The marker goes after the existing columns and does not change the input.
+function DataFrame:null_mask(name)
+  name = name == nil and "has_nulls" or name
+  if type(name) ~= "string" or name == "" then
+    error("null_mask name must be a non-empty string", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_null_mask(self:_require_open(), name, err)
   return new_frame(pointer, err)
 end
 
@@ -1507,7 +1581,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.21.0",
+  _VERSION = "0.22.0",
   null = json.null,
   DataFrame = DataFrame,
 }
@@ -2104,11 +2178,12 @@ end
 local JSON_READ_OPTION_KEYS = {
   format = true,
   columns = true,
+  infer_schema_length = true,
 }
 
 local function read_json_options(options)
   if options == nil then
-    return "array", nil
+    return "array", nil, nil
   end
   if type(options) ~= "table" then
     error("read_json options must be a table", 3)
@@ -2118,15 +2193,23 @@ local function read_json_options(options)
       error("read_json options: unknown field '" .. tostring(key) .. "'", 3)
     end
   end
+  local infer_schema_length = options.infer_schema_length
+  if infer_schema_length ~= nil and
+      (type(infer_schema_length) ~= "number" or infer_schema_length < 0 or
+        infer_schema_length % 1 ~= 0 or
+        infer_schema_length > MAX_SAFE_INTEGER) then
+    error("read_json infer_schema_length must be a non-negative integer", 3)
+  end
   return json_format(options.format, "read_json"),
-    column_projection(options.columns, "read_json")
+    column_projection(options.columns, "read_json"),
+    infer_schema_length
 end
 
 function polars.read_json(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_json path must be a non-empty string", 2)
   end
-  local format, columns = read_json_options(options)
+  local format, columns, infer_schema_length = read_json_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -2135,8 +2218,15 @@ function polars.read_json(path, options)
       names[index - 1] = name
     end
   end
-  local pointer = lib.pl_dataframe_read_json(path,
-    format == "lines" and 1 or 0, names, names and #columns or 0, err)
+  local pointer
+  if infer_schema_length ~= nil then
+    pointer = lib.pl_dataframe_read_json_inferred(path,
+      format == "lines" and 1 or 0, names, names and #columns or 0,
+      infer_schema_length, err)
+  else
+    pointer = lib.pl_dataframe_read_json(path,
+      format == "lines" and 1 or 0, names, names and #columns or 0, err)
+  end
   return new_frame(pointer, err)
 end
 

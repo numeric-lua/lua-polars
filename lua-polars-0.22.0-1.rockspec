@@ -1,9 +1,9 @@
 package = "lua-polars"
-version = "0.21.0-1"
+version = "0.22.0-1"
 
 source = {
    url = "git+https://github.com/numeric-lua/lua-polars.git",
-   tag = "v0.21.0",
+   tag = "v0.22.0",
 }
 
 description = {
@@ -12,17 +12,18 @@ description = {
 Eager DataFrames over Polars: CSV/Parquet/JSON readers and writers with CSV
 delimiter/header/quote/comment/columns/renames/dtypes/null-values reader
 options, per-column null markers, skip-rows/row-limit windows, post-header row
-skipping, schema-inference length, decimal-comma numbers, date inference,
-UTF-8 lossy decoding, truncation of ragged rows, recovery of unparsable values,
-and empty-file handling; Parquet column projections and row windows; Parquet
-compression/statistics/chunk-size writer options; CSV
+skipping, CSV/JSON schema-inference length, decimal-comma numbers, date
+inference, UTF-8 lossy decoding, truncation of ragged rows, recovery of
+unparsable values, and empty-file handling; Parquet column projections and row
+windows; Parquet compression/statistics/chunk-size writer options; CSV
 delimiter/header/null-value/line-terminator/quote-style/float-precision/BOM/
 decimal-comma writer options; JSON array/JSON Lines formats with projections;
 SQL, select, filter, sort, group-by, value counts, joins, head/tail/slice, row
-indexing, row reversal, shifting, clipping, duplicate/unique markers, strict
-column casting, subset distinct rows, list-column explode, column-scoped null
-dropping and filling, NaN filling and dropping, ordered columns, and
-JSON/table conversion. Requires LuaJIT and a Rust toolchain at build time.
+indexing, row reversal, shifting, clipping, row striding, null masks,
+forward/backward null filling, duplicate/unique markers, strict column casting,
+subset distinct rows, list-column explode, column-scoped null dropping and
+filling, NaN filling and dropping, ordered columns, and JSON/table conversion.
+Requires LuaJIT and a Rust toolchain at build time.
 ]],
    homepage = "https://github.com/numeric-lua/lua-polars",
    license = "BSD-3-Clause",

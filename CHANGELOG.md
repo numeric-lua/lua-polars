@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.22.0
+
+- five DataFrame/IO additions:
+  - `df:fill_null_forward([columns])` carries the previous non-null value into
+    each null, leaves leading nulls in place, and supports every-column or
+    validated-subset filling;
+  - `df:fill_null_backward([columns])` carries the next non-null value into
+    each null, leaves trailing nulls in place, and uses the same subset rules;
+  - `df:gather_every(n [, offset])` returns the strided row window `offset`,
+    `offset+n`, and so on, keeping the schema and returning an empty frame when
+    the offset is past the end;
+  - `df:null_mask([name])` appends a Boolean marker that is true when any
+    column in the row is null, with a default `has_nulls` name;
+  - `polars.read_json(..., { infer_schema_length = n })` controls JSON Lines
+    schema inference, where `0` scans the whole stream and a positive value
+    limits the record window; JSON arrays ignore the setting;
+- the additive C ABI entry points are `pl_dataframe_fill_null_forward`,
+  `pl_dataframe_fill_null_backward`, `pl_dataframe_gather_every`,
+  `pl_dataframe_null_mask`, and `pl_dataframe_read_json_inferred`; every
+  earlier signature and default is unchanged;
+- validation covers malformed or duplicate fill subsets, closed frames,
+  zero/negative/fractional/non-numeric/above-`2^53 - 1` gather counts and
+  offsets, empty/colliding/non-string null-mask names, zero-column frames, and
+  negative/fractional/non-numeric inference lengths;
+- tests cover forward/backward propagation with leading and trailing nulls,
+  subset isolation, odd/even/past-end striding, any-null masks with custom
+  names and clean frames, JSON Lines inference with `0`, positive windows,
+  projections and arrays, and every new error path, including the
+  installed-prefix smoke test;
+- `./scripts/test.sh` passed 172 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validate the installed-prefix and LuaRocks layouts
+  for 0.22.0-1;
+- the 0.22.0 tag is created for this release.
+
 ## 0.21.0
 
 - five DataFrame/IO additions:

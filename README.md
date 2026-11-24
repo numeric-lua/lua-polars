@@ -26,7 +26,7 @@ end
 
 ## Status
 
-`0.21.0` is an eager-first MVP:
+`0.22.0` is an eager-first MVP:
 
 - CSV, Parquet, and JSON readers and writers
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
@@ -58,8 +58,9 @@ end
   `brotli`, `lz4`, `uncompressed`), `statistics = false` to skip column
   statistics, and positive `row_group_size`/`data_page_size` chunk controls
 - JSON reader options: `format = "array"` (default; alias `"json"`) or
-  `"lines"`/`"ndjson"` and a `columns` name/list projection; JSON writers
-  support the same array/lines formats
+  `"lines"`/`"ndjson"`, a `columns` name/list projection, and a non-negative
+  `infer_schema_length` for JSON Lines (`0` scans the whole stream); JSON
+  writers support the same array/lines formats
 - schema, shape, head/tail/slice, ordered columns, and `with_row_index`
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort, group-by, `value_counts`, drop, rename,
@@ -72,11 +73,14 @@ end
   first/last/none/any keep strategies, and `explode(columns [, options])` for
   list columns
 - `is_duplicated([name])`/`is_unique([name])` append a Boolean marker column
-  for repeated or single-occurrence full rows
+  for repeated or single-occurrence full rows, `null_mask([name])` appends a
+  row-level any-null marker, and `gather_every(n [, offset])` returns a strided
+  row window
 - `drop_nulls([columns])` with an optional column subset, `fill_null(value
-  [, columns])` for scalar and column-scoped replacement, `fill_nan(value
-  [, columns])`/`drop_nans([columns])` for the separate floating-point NaN
-  state, `unique()`/`null_count()`, and row iteration helpers
+  [, columns])` for scalar and column-scoped replacement,
+  `fill_null_forward/backward([columns])` for direction-aware fills,
+  `fill_nan(value [, columns])`/`drop_nans([columns])` for the separate
+  floating-point NaN state, `unique()`/`null_count()`, and row iteration helpers
 - explicit `:close()` plus Lua GC finalization
 - a LuaRocks source rockspec and a self-contained prefix install
 
@@ -120,11 +124,12 @@ The test suite is dependency-free and covers CSV/Parquet/JSON parsing and
 writing, custom CSV delimiters, quote characters, comment prefixes, headerless
 files, read-time column projection, positional column renaming, dtype overrides,
 literal and per-column null markers, UTF-8 lossy decoding,
-skip-rows/row-limit windows, post-header row skipping, schema-inference limits,
-decimal-comma numbers, CSV date inference and writer quote styles, empty-file
-reads, NaN fill/drop, shift/clip transforms, duplicate and unique markers,
-writer delimiter/header/null/line-terminator options, UTF-8 BOM and
-decimal-comma output,
+skip-rows/row-limit windows, post-header row skipping, CSV/JSON schema-inference
+limits, decimal-comma numbers, CSV date inference and writer quote styles,
+empty-file reads, NaN fill/drop, shift/clip transforms, strided row windows,
+null masks, forward/backward null fills, duplicate and unique markers, writer
+delimiter/header/null/line-terminator options, UTF-8 BOM and decimal-comma
+output,
 Parquet column projections, row windows, compression codecs, statistics and
 chunk-size writer options, JSON array/JSON Lines round-trips, schema, head,
 tail, slice, row indexing, projection, row reversal, strict casting,
@@ -151,17 +156,17 @@ Lua loader also searches the directories on `package.cpath`, so no
 `POLARS_LUA_LIB` is needed.
 
 ```sh
-luarocks make lua-polars-0.21.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.22.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 For a clean checkout the first command compiles Polars; set
 `CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec and
-`scripts/build.sh` default to one job). The source URL points at the `v0.21.0`
+`scripts/build.sh` default to one job). The source URL points at the `v0.22.0`
 tag, which is created as part of the release: use `luarocks make` from a
 checkout before the tag exists, and
-`luarocks build lua-polars-0.21.0-1.rockspec` afterwards. Both use the same
+`luarocks build lua-polars-0.22.0-1.rockspec` afterwards. Both use the same
 build and install commands.
 
 ## Install into a prefix
@@ -220,6 +225,7 @@ polars.read_json(path)
 polars.read_json(path, {
   format = "lines",
   columns = { "time", "event" },
+  infer_schema_length = 0,
 })
 
 df:shape()                -- rows, cols
@@ -236,7 +242,11 @@ df:cast({ score = "f64" })
 df:unique("team", { keep = "last" })
 df:is_duplicated()
 df:is_unique("only_row")
+df:null_mask("has_holes")
+df:gather_every(2, 1)
 df:explode("tags", { keep_nulls = false })
+df:fill_null_forward("note")
+df:fill_null_backward({ "note", "score" })
 df:fill_nan(0, "score")
 df:drop_nans({ "score", "bonus" })
 df:sql(query)

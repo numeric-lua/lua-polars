@@ -8,6 +8,7 @@
 
 use std::ffi::{CStr, CString};
 use std::fs::File;
+use std::num::NonZeroUsize;
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -1817,6 +1818,61 @@ pub unsafe extern "C" fn pl_dataframe_read_json(
     finish_frame(result, err)
 }
 
+/// Reads a JSON array or JSON Lines file with an optional inference window.
+///
+/// The arguments match [`pl_dataframe_read_json`] and keep the same meaning and
+/// defaults. `infer_schema_length` applies to JSON Lines: `-1` keeps Polars'
+/// default 100-record window, `0` scans the whole stream to infer the schema,
+/// and a positive value limits inference to that many records. JSON arrays are
+/// read as a whole by Polars, so the argument has no effect there. This entry
+/// point is additive; every earlier reader signature and default is unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_json_inferred(
+    path: *const c_char,
+    json_lines: i32,
+    columns: *const *const c_char,
+    column_count: u64,
+    infer_schema_length: i64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let columns = read_json_columns(columns, column_count)?;
+        if infer_schema_length < -1 {
+            return Err("JSON infer_schema_length must be -1 or a non-negative integer".to_string());
+        }
+        let file = File::open(&path).map_err(|error| error.to_string())?;
+        let mut reader = JsonReader::new(file).with_json_format(if json_lines != 0 {
+            JsonFormat::JsonLines
+        } else {
+            JsonFormat::Json
+        });
+        if json_lines != 0 {
+            if infer_schema_length == 0 {
+                reader = reader.infer_schema_len(None);
+            } else if infer_schema_length > 0 {
+                let records = usize::try_from(infer_schema_length).map_err(|_| {
+                    "JSON infer_schema_length is too large for this platform".to_string()
+                })?;
+                let records = NonZeroUsize::new(records).ok_or_else(|| {
+                    "JSON infer_schema_length must be positive or zero".to_string()
+                })?;
+                reader = reader.infer_schema_len(Some(records));
+            }
+        }
+        if let Some(columns) = columns {
+            reader = reader.with_projection(Some(
+                columns
+                    .iter()
+                    .map(|name| PlSmallStr::from_str(name.as_str()))
+                    .collect(),
+            ));
+        }
+        reader.finish().map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_free(ptr: *mut PlFrame) {
     if !ptr.is_null() {
@@ -2213,6 +2269,181 @@ pub unsafe extern "C" fn pl_dataframe_cast(
                 .with_column(casted)
                 .map_err(|error| error.to_string())?;
         }
+        Ok(output)
+    }));
+    finish_frame(result, err)
+}
+
+/// Fills nulls in place using a Polars fill-null strategy.
+///
+/// A null/zero request targets every column; otherwise each named column is
+/// validated and filled independently so the frame keeps its column order and
+/// the other columns keep their nulls. The input frame is unchanged.
+fn fill_null_direction_frame(
+    df: &DataFrame,
+    requested: &[String],
+    strategy: FillNullStrategy,
+    operation: &str,
+) -> Result<DataFrame, String> {
+    let names: Vec<String> = if requested.is_empty() {
+        df.get_column_names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    } else {
+        let mut names = Vec::with_capacity(requested.len());
+        for name in requested {
+            if df.get_column_index(name.as_str()).is_none() {
+                return Err(format!(
+                    "{operation} column '{name}' is not a column in the DataFrame"
+                ));
+            }
+            names.push(name.clone());
+        }
+        names
+    };
+    let mut output = df.clone();
+    for name in names {
+        let index = output.get_column_index(name.as_str()).ok_or_else(|| {
+            format!("{operation} column '{name}' is not a column in the DataFrame")
+        })?;
+        let filled = output.columns()[index]
+            .fill_null(strategy)
+            .map_err(|error| format!("could not fill nulls in column '{name}': {error}"))?;
+        output
+            .with_column(filled)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(output)
+}
+
+/// Fills nulls with the previous non-null value in each targeted column.
+///
+/// A null/zero `columns` count targets every column; a name or contiguous list
+/// limits the fill and leaves unselected columns untouched. Leading nulls stay
+/// null because no previous value exists. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_fill_null_forward(
+    ptr: *mut PlFrame,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let requested = read_name_list(columns, column_count, "fill_null_forward columns")?;
+        fill_null_direction_frame(
+            &frame.df,
+            &requested,
+            FillNullStrategy::Forward(None),
+            "fill_null_forward",
+        )
+    }));
+    finish_frame(result, err)
+}
+
+/// Fills nulls with the next non-null value in each targeted column.
+///
+/// A null/zero `columns` count targets every column; a name or contiguous list
+/// limits the fill and leaves unselected columns untouched. Trailing nulls stay
+/// null because no following value exists. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_fill_null_backward(
+    ptr: *mut PlFrame,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let requested = read_name_list(columns, column_count, "fill_null_backward columns")?;
+        fill_null_direction_frame(
+            &frame.df,
+            &requested,
+            FillNullStrategy::Backward(None),
+            "fill_null_backward",
+        )
+    }));
+    finish_frame(result, err)
+}
+
+/// Returns every `n`th row starting at `offset`.
+///
+/// `n` must be positive; `offset` is a zero-based row index and may be past the
+/// end, which returns an empty frame with the same schema. The result is a
+/// newly owned frame and the input frame is unchanged. This entry point is
+/// additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_gather_every(
+    ptr: *mut PlFrame,
+    n: u64,
+    offset: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let step = usize::try_from(n)
+            .map_err(|_| "gather_every n is too large for this platform".to_string())?;
+        if step == 0 {
+            return Err("gather_every n must be positive".to_string());
+        }
+        let offset = usize::try_from(offset)
+            .map_err(|_| "gather_every offset is too large for this platform".to_string())?;
+        let height = frame.df.height();
+        let indices: Vec<IdxSize> = (offset..height)
+            .step_by(step)
+            .map(|index| index as IdxSize)
+            .collect();
+        let indices = IdxCa::from_vec(PlSmallStr::EMPTY, indices);
+        frame
+            .df
+            .take(&indices)
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
+/// Appends a Boolean row mask that is true when any column is null.
+///
+/// `name` is the appended column name; a null pointer keeps the default
+/// `has_nulls`. The name must be non-empty and must not collide with an
+/// existing column. A zero-column frame has no rows that can be tested, so it
+/// is an error. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_null_mask(
+    ptr: *mut PlFrame,
+    name: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let name = if name.is_null() {
+            "has_nulls".to_string()
+        } else {
+            read_utf8(name, "null mask name")?
+        };
+        if name.is_empty() {
+            return Err("null mask name must not be empty".to_string());
+        }
+        if frame.df.get_column_index(name.as_str()).is_some() {
+            return Err(format!(
+                "null mask column '{name}' already exists in the DataFrame"
+            ));
+        }
+        let columns = frame.df.columns();
+        let Some(first) = columns.first() else {
+            return Err("null_mask requires at least one column".to_string());
+        };
+        let mut mask = first.is_null();
+        for column in &columns[1..] {
+            mask = mask | column.is_null();
+        }
+        let mut output = frame.df.clone();
+        let mut marker = mask.into_column();
+        marker.rename(PlSmallStr::from_str(&name));
+        output
+            .with_column(marker)
+            .map_err(|error| error.to_string())?;
         Ok(output)
     }));
     finish_frame(result, err)

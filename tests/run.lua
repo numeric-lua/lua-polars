@@ -85,10 +85,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.21.0")
+  eq(polars.version(), "0.22.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.21.0")
+  eq(polars._VERSION, "0.22.0")
 end)
 
 current = "csv"
@@ -3306,6 +3306,271 @@ test("read_csv infer_schema_length rejects invalid values", function()
     truthy(tostring(err):find("non-negative integer", 1, true),
       "infer_schema_length guidance: " .. tostring(err))
   end
+end)
+
+test("fill_null_forward and fill_null_backward carry values", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,note\n1,one\n2,\n3,\n4,four\n5,\n")
+  file:close()
+  local df = polars.read_csv(path)
+
+  local forward = df:fill_null_forward()
+  eq(forward:shape(), df:shape())
+  eq(table.concat(forward:columns(), ","), "id,note")
+  eq(forward:schema().note, "str")
+  local rows = forward:to_table()
+  eq(rows[1].note, "one")
+  eq(rows[2].note, "one")
+  eq(rows[3].note, "one")
+  eq(rows[4].note, "four")
+  eq(rows[5].note, "four")
+  forward:close()
+
+  local backward = df:fill_null_backward()
+  rows = backward:to_table()
+  eq(rows[1].note, "one")
+  eq(rows[2].note, "four")
+  eq(rows[3].note, "four")
+  eq(rows[4].note, "four")
+  eq(rows[5].note, polars.null)
+  backward:close()
+
+  local scoped = df:fill_null_forward("id")
+  eq(scoped:to_table()[2].note, polars.null,
+    "forward fill touched an unselected column")
+  scoped:close()
+  local scoped_back = df:fill_null_backward({ "id" })
+  eq(scoped_back:to_table()[3].note, polars.null,
+    "backward fill touched an unselected column")
+  scoped_back:close()
+  eq(df:to_table()[2].note, polars.null, "fill direction changed the input")
+  df:close()
+end)
+
+test("fill_null direction rejects invalid subsets and closed frames", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { true, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "score", [3] = "active" }, "contiguous list" },
+    { { "score", "score" }, "duplicate fill_null_" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:fill_null_forward(case[1]) end)
+    eq(ok, false, "invalid fill_null_forward subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+    ok, err = pcall(function() df:fill_null_backward(case[1]) end)
+    eq(ok, false, "invalid fill_null_backward subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:fill_null_forward() end)
+  eq(ok, false, "closed fill_null_forward accepted")
+  truthy(tostring(err):find("closed", 1, true),
+    "closed fill_null_forward error")
+  ok, err = pcall(function() df:fill_null_backward() end)
+  eq(ok, false, "closed fill_null_backward accepted")
+  truthy(tostring(err):find("closed", 1, true),
+    "closed fill_null_backward error")
+end)
+
+test("gather_every returns a strided row window", function()
+  local df = polars.read_csv(fixture)
+  local even = df:gather_every(2)
+  eq(even:shape(), 3)
+  eq(table.concat(even:columns(), ","), "name,team,score,active")
+  eq(even:schema().score, "i64")
+  local rows = even:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[2].name, "caio")
+  eq(rows[3].name, "eva")
+  even:close()
+
+  local odd = df:gather_every(2, 1)
+  eq(odd:shape(), 2)
+  rows = odd:to_table()
+  eq(rows[1].name, "bia")
+  eq(rows[2].name, "duda")
+  odd:close()
+
+  local all = df:gather_every(1)
+  eq(all:shape(), df:shape())
+  eq(all:to_table()[1].name, "ana")
+  all:close()
+
+  local past = df:gather_every(2, 6)
+  eq(past:shape(), 0)
+  eq(table.concat(past:columns(), ","), "name,team,score,active")
+  past:close()
+
+  local sparse = df:gather_every(10)
+  eq(sparse:shape(), 1)
+  eq(sparse:to_table()[1].name, "ana")
+  sparse:close()
+  eq(df:to_table()[1].name, "ana", "gather_every changed the input frame")
+  df:close()
+end)
+
+test("gather_every rejects invalid counts and offsets", function()
+  local df = polars.read_csv(fixture)
+  for _, value in ipairs({ 0, -1, 1.5, "2", true, {}, math.huge,
+      9007199254740992 }) do
+    local ok, err = pcall(function() df:gather_every(value) end)
+    eq(ok, false, "invalid gather_every n accepted")
+    truthy(tostring(err):find("positive integer", 1, true),
+      "gather_every n error: " .. tostring(err))
+  end
+  for _, value in ipairs({ -1, 1.5, "0", true, {}, math.huge,
+      9007199254740992 }) do
+    local ok, err = pcall(function() df:gather_every(2, value) end)
+    eq(ok, false, "invalid gather_every offset accepted")
+    truthy(tostring(err):find("non-negative integer", 1, true),
+      "gather_every offset error: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:gather_every(2) end)
+  eq(ok, false, "closed gather_every accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed gather_every error")
+end)
+
+test("null_mask marks rows with any null", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,note,score\n1,one,10\n2,,20\n3,three,\n,four,40\n")
+  file:close()
+  local df = polars.read_csv(path)
+  local masked = df:null_mask()
+  eq(table.concat(masked:columns(), ","), "id,note,score,has_nulls")
+  eq(masked:shape(), df:shape())
+  local rows = masked:to_table()
+  eq(rows[1].has_nulls, false)
+  eq(rows[2].has_nulls, true)
+  eq(rows[3].has_nulls, true)
+  eq(rows[4].has_nulls, true)
+  masked:close()
+
+  local custom = df:null_mask("missing")
+  eq(custom:columns()[4], "missing")
+  eq(custom:to_table()[2].missing, true)
+  custom:close()
+
+  local clean = polars.read_csv(fixture):null_mask()
+  for _, row in ipairs(clean:to_table()) do
+    eq(row.has_nulls, false)
+  end
+  clean:close()
+  eq(table.concat(df:columns(), ","), "id,note,score",
+    "null_mask changed the input frame")
+  df:close()
+end)
+
+test("null_mask rejects names, empty frames, and closed handles", function()
+  local df = polars.read_csv(fixture)
+  local ok, err = pcall(function() df:null_mask("score") end)
+  eq(ok, false, "colliding null mask name accepted")
+  truthy(tostring(err):find("already exists", 1, true),
+    "null mask collision error: " .. tostring(err))
+  for _, value in ipairs({ "", 42, true, {} }) do
+    ok, err = pcall(function() df:null_mask(value) end)
+    eq(ok, false, "invalid null mask name accepted")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      "null mask name error: " .. tostring(err))
+  end
+  df:close()
+  ok, err = pcall(function() df:null_mask() end)
+  eq(ok, false, "closed null_mask accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed null_mask error")
+
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:close()
+  local empty = polars.read_csv(path, { raise_if_empty = false })
+  ok, err = pcall(function() empty:null_mask() end)
+  eq(ok, false, "null_mask accepted a zero-column frame")
+  truthy(tostring(err):find("at least one column", 1, true),
+    "zero-column null_mask error: " .. tostring(err))
+  empty:close()
+end)
+
+test("read_json infer_schema_length controls JSON Lines inference", function()
+  local path = new_temp_path(".jsonl")
+  local file = assert(io.open(path, "w"))
+  file:write('{"x":1}\n{"x":2}\n{"x":3}\n')
+  file:close()
+  local positive = polars.read_json(path, {
+    format = "lines",
+    infer_schema_length = 2,
+  })
+  eq(positive:schema().x, "i64")
+  eq(positive:shape(), 3)
+  eq(positive:to_table()[3].x, 3)
+  positive:close()
+
+  local mixed = new_temp_path(".jsonl")
+  local mixed_file = assert(io.open(mixed, "w"))
+  mixed_file:write('{"x":1}\n{"x":2.5}\n{"x":3}\n')
+  mixed_file:close()
+  local full = polars.read_json(mixed, {
+    format = "lines",
+    infer_schema_length = 0,
+  })
+  eq(full:schema().x, "f64")
+  local rows = full:to_table()
+  eq(rows[1].x, 1)
+  eq(rows[2].x, 2.5)
+  eq(rows[3].x, 3)
+  full:close()
+
+  local projected = polars.read_json(path, {
+    format = "lines",
+    infer_schema_length = 0,
+    columns = { "x" },
+  })
+  eq(table.concat(projected:columns(), ","), "x")
+  eq(projected:to_table()[1].x, 1)
+  projected:close()
+
+  local array_path = new_temp_path(".json")
+  local array_file = assert(io.open(array_path, "w"))
+  array_file:write('[{"x":1},{"x":2}]')
+  array_file:close()
+  local array = polars.read_json(array_path, { infer_schema_length = 1 })
+  eq(array:shape(), 2)
+  eq(array:schema().x, "i64")
+  array:close()
+end)
+
+test("read_json infer_schema_length rejects invalid values and mismatches", function()
+  local path = new_temp_path(".jsonl")
+  local file = assert(io.open(path, "w"))
+  file:write('{"x":1}\n{"x":2.5}\n')
+  file:close()
+  for _, value in ipairs({ -1, 1.5, "1", true, {}, math.huge, 0 / 0,
+      9007199254740992 }) do
+    local ok, err = pcall(polars.read_json, path, {
+      format = "lines",
+      infer_schema_length = value,
+    })
+    eq(ok, false, "invalid JSON infer_schema_length accepted")
+    truthy(tostring(err):find("infer_schema_length", 1, true),
+      "JSON infer_schema_length option name: " .. tostring(err))
+    truthy(tostring(err):find("non-negative integer", 1, true),
+      "JSON infer_schema_length guidance: " .. tostring(err))
+  end
+
+  local ok, err = pcall(polars.read_json, path, {
+    format = "lines",
+    infer_schema_length = 1,
+  })
+  eq(ok, false, "inference window too small did not fail the read")
+  truthy(tostring(err):find("parse", 1, true) or
+    tostring(err):find("Int64", 1, true),
+    "inference mismatch error: " .. tostring(err))
 end)
 
 cleanup_temp_files()

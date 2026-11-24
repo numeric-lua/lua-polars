@@ -18,8 +18,8 @@ check(source:sub(1, 1) == "@", "module source is not a file path")
 local module_path = source:sub(2)
 check(module_path:sub(1, #prefix) == prefix,
   "loaded polars from outside the installed prefix: " .. module_path)
-check(polars.version() == "0.21.0", "unexpected bridge version")
-check(polars._VERSION == "0.21.0", "unexpected Lua module version")
+check(polars.version() == "0.22.0", "unexpected bridge version")
+check(polars._VERSION == "0.22.0", "unexpected Lua module version")
 
 local df = polars.read_csv(fixture)
 local rows, cols = df:shape()
@@ -77,6 +77,29 @@ local unique_rows = row_tools:is_unique()
 check(unique_rows:to_table()[1].unique == true,
   "unexpected unique marker value")
 unique_rows:close()
+local strided = row_tools:gather_every(2)
+check(strided:shape() == 3, "unexpected gather_every shape")
+check(strided:to_table()[1].name == "ana", "unexpected gather_every row")
+strided:close()
+local masked = row_tools:null_mask()
+check(masked:columns()[5] == "has_nulls", "null mask was not appended")
+check(masked:to_table()[1].has_nulls == false, "unexpected null mask value")
+masked:close()
+local nullable_path = os.tmpname()
+local nullable_file = assert(io.open(nullable_path, "w"))
+nullable_file:write("id,note\n1,one\n2,\n3,three\n")
+nullable_file:close()
+local nullable = polars.read_csv(nullable_path)
+local forward_filled = nullable:fill_null_forward()
+check(forward_filled:to_table()[2].note == "one",
+  "unexpected forward fill value")
+forward_filled:close()
+local backward_filled = nullable:fill_null_backward()
+check(backward_filled:to_table()[2].note == "three",
+  "unexpected backward fill value")
+backward_filled:close()
+nullable:close()
+os.remove(nullable_path)
 row_tools:close()
 
 local string_schema = polars.read_csv(fixture, { infer_schema_length = 0 })
@@ -376,7 +399,10 @@ check(json_loaded:to_table()[3].note == polars.null,
   "unexpected JSON null round-trip")
 json_loaded:close()
 writer:write_json(json_out, { format = "lines" })
-json_loaded = polars.read_json(json_out, { format = "lines" })
+json_loaded = polars.read_json(json_out, {
+  format = "lines",
+  infer_schema_length = 0,
+})
 check(json_loaded:shape() == 3, "unexpected JSON Lines round-trip shape")
 check(json_loaded:to_table()[1].name == "ana",
   "unexpected JSON Lines round-trip value")
