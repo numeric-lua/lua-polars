@@ -1,4 +1,4 @@
-# lua-polars API — 0.20.0
+# lua-polars API — 0.21.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.20.0"`).
+Returns the bridge version (`"0.21.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -44,6 +44,13 @@ Polars' default.
   data rows read after the header. `n_rows = 0` reads no data rows while
   keeping the header-derived schema; a limit larger than the file reads the
   remaining rows. Like `skip_rows`, it must be at most `2^53 - 1`.
+- `infer_schema_length`: a non-negative integer limiting how many data rows
+  Polars uses to infer dtypes. The default is Polars' 100-row window. `0`
+  reads every column as `str` instead of inferring numeric, Boolean, or date
+  types; a positive value narrows or widens the window. The whole requested
+  row window is still read after inference, and explicit `dtypes` overrides
+  still win. It composes with every other reader option and must be at most
+  `2^53 - 1`.
 - `raise_if_empty`: a boolean, default `true`. Polars treats a file with no
   header and no records as empty and raises. Set it to `false` to read such a
   file as an empty frame instead; the result has no columns because no header
@@ -164,6 +171,7 @@ local recovered = polars.read_csv("legacy.csv", {
 local optional = polars.read_csv("maybe-empty.csv", {
   raise_if_empty = false,
 })
+local strings = polars.read_csv("wide.csv", { infer_schema_length = 0 })
 ```
 
 Unknown option keys are errors so typos do not silently fall back to defaults.
@@ -171,8 +179,9 @@ Errors also cover invalid option types, invalid one-byte values, option
 collisions, invalid projection names, unsupported or missing dtype overrides,
 invalid or per-column null-value markers, invalid rename lists, unsupported
 encodings, non-boolean lenient options, non-boolean `raise_if_empty`, invalid
-post-header or pre-header row counts, non-boolean `decimal_comma`, a missing or
-unreadable path, and files that cannot be parsed.
+post-header or pre-header row counts, invalid `infer_schema_length`,
+non-boolean `decimal_comma`, a missing or unreadable path, and files that cannot
+be parsed.
 
 ### `polars.read_parquet(path [, options]) -> DataFrame`
 
@@ -304,6 +313,44 @@ empty. Calling it on a closed frame is an error.
 ```lua
 local newest_first = df:reverse()
 ```
+
+### `df:shift(periods [, columns]) -> DataFrame`
+
+Shifts column values by `periods` rows, keeping the column names, order, and
+dtypes. Positive periods move values toward later rows and insert nulls at the
+start; negative periods move values toward earlier rows and insert nulls at the
+end; `0` returns an unchanged copy. With no `columns` every column shifts. A
+single column name or a non-empty contiguous list limits the shift to those
+columns and leaves the others untouched. The input frame is unchanged.
+
+```lua
+local lagged = df:shift(1)
+local lead_score = df:shift(-1, "score")
+local paired = df:shift(2, { "score", "bonus" })
+```
+
+Non-integer, non-numeric, or above-`2^53 - 1` periods, malformed, duplicate,
+empty, or unknown column subsets, and closed frames are errors.
+
+### `df:clip(min, max [, columns]) -> DataFrame`
+
+Clamps numeric values to the inclusive `[min, max]` range. `min` and `max`
+must be finite numbers with `min <= max`; a non-integral bound on an integer
+column is an error instead of being silently truncated. With no `columns` every
+primitive numeric column is clipped and string, Boolean, and other non-numeric
+columns are left unchanged. A single name or a non-empty contiguous list
+restricts the operation and must name only numeric columns. Nulls are
+preserved, column order is preserved, and the input frame is unchanged.
+
+```lua
+local bounded = df:clip(0, 100)
+local scored = df:clip(0, 10, "score")
+local paired = df:clip(-1, 1, { "score", "bonus" })
+```
+
+NaN or infinite bounds, `min > max`, a fractional bound on an integer column,
+unknown or non-numeric columns in an explicit subset, malformed or duplicate
+subsets, and closed frames are errors.
 
 ### `df:cast(mapping) -> DataFrame`
 
@@ -441,6 +488,32 @@ local paired = df:drop_nans({ "score", "bonus" })
 
 Unknown, duplicate, empty, or non-contiguous column subsets and closed frames
 are errors.
+
+### `df:is_duplicated([name]) -> DataFrame`
+
+Returns a new frame with a Boolean marker column appended after the existing
+columns. The marker is `true` for every row whose complete row value occurs
+more than once; full-row values are compared, including nulls. `name` defaults
+to `"duplicated"` and must be a non-empty string that does not collide with an
+existing column. The input frame is unchanged.
+
+```lua
+local flagged = df:is_duplicated()
+local custom = df:is_duplicated("repeat")
+```
+
+### `df:is_unique([name]) -> DataFrame`
+
+The inverse of `is_duplicated`: appends a Boolean column that is `true` for rows
+whose complete row value occurs exactly once. `name` defaults to `"unique"` and
+follows the same non-empty, non-colliding rules. The input frame is unchanged.
+
+```lua
+local singles = df:is_unique()
+local named = df:is_unique("only_row")
+```
+
+Empty, non-string, or colliding marker names and closed frames are errors.
 
 ### `df:sql(query) -> DataFrame`
 
@@ -812,6 +885,20 @@ PlFrame *pl_dataframe_read_csv_empty_policy(
     const char *encoding, int32_t try_parse_dates,
     int32_t decimal_comma, int32_t truncate_ragged_lines,
     int32_t ignore_errors, int32_t raise_if_empty, char **err);
+PlFrame *pl_dataframe_read_csv_inferred(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, uint64_t skip_rows_after_header, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t decimal_comma, int32_t truncate_ragged_lines,
+    int32_t ignore_errors, int32_t raise_if_empty,
+    int64_t infer_schema_length, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -830,6 +917,12 @@ PlFrame *pl_dataframe_slice(
 PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_shift(
+    PlFrame *frame, int64_t periods, const char *const *columns,
+    uint64_t column_count, char **err);
+PlFrame *pl_dataframe_clip(
+    PlFrame *frame, double minimum, double maximum, const char *const *columns,
+    uint64_t column_count, char **err);
 PlFrame *pl_dataframe_cast(
     PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
 PlFrame *pl_dataframe_fill_nan(
@@ -838,6 +931,10 @@ PlFrame *pl_dataframe_fill_nan(
 PlFrame *pl_dataframe_drop_nans(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     char **err);
+PlFrame *pl_dataframe_is_duplicated(
+    PlFrame *frame, const char *name, char **err);
+PlFrame *pl_dataframe_is_unique(
+    PlFrame *frame, const char *name, char **err);
 PlFrame *pl_dataframe_unique(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     const char *keep, int32_t maintain_order, char **err);
@@ -904,15 +1001,29 @@ returns an empty frame instead. The argument affects only the empty-file check,
 so malformed content still fails. Earlier reader entry points keep
 `raise_if_empty` enabled.
 
+`pl_dataframe_read_csv_inferred` is additive and carries every argument from
+`pl_dataframe_read_csv_empty_policy` plus `int64_t infer_schema_length`.
+`-1` keeps Polars' default 100-row inference window, `0` infers every column as
+`str`, and a non-negative value sets the row count used for inference. The
+argument is a `usize` after conversion, so an out-of-range value is an error.
+Explicit `dtypes` overrides still take precedence.
+
 `pl_dataframe_reverse` returns a newly owned frame with the same columns and
-reversed row order. `pl_dataframe_cast` borrows `pair_count` `column`, `dtype`
-string pairs (a flat array of `2 * pair_count` names); casting is strict and
-preserves column order. `pl_dataframe_unique` borrows an optional column list
-and a keep string (`first`, `last`, `none`, or `any`), with a non-zero
-`maintain_order` selecting the stable distinct. `pl_dataframe_explode`
-borrows a non-empty list of list-typed columns; `keep_nulls` and
-`empty_as_null` control the null/empty-list rows. All four are additive and
-leave the input handle open.
+reversed row order. `pl_dataframe_shift` borrows an optional column list; a
+null/zero count shifts every column, a positive `periods` inserts leading nulls,
+and a negative value inserts trailing nulls. `pl_dataframe_clip` clamps every
+numeric column (or only the borrowed explicit list) to the inclusive
+`[minimum, maximum]` range, preserves nulls, and rejects non-integral bounds on
+integer columns. `pl_dataframe_is_duplicated` and `pl_dataframe_is_unique`
+append a Boolean marker column whose name is the borrowed `name` (or
+`duplicated`/`unique` for a null pointer) and reject collisions with existing
+columns. `pl_dataframe_cast` borrows `pair_count` `column`, `dtype` string pairs
+(a flat array of `2 * pair_count` names); casting is strict and preserves column
+order. `pl_dataframe_unique` borrows an optional column list and a keep string
+(`first`, `last`, `none`, or `any`), with a non-zero `maintain_order` selecting
+the stable distinct. `pl_dataframe_explode` borrows a non-empty list of
+list-typed columns; `keep_nulls` and `empty_as_null` control the null/empty-list
+rows. All of these are additive and leave the input handle open.
 
 `pl_dataframe_fill_nan` replaces NaN in Float32/Float64 columns with the finite
 `double value`; a null/zero column count targets every float column, and a
@@ -1065,7 +1176,7 @@ failure.
 
 ### LuaRocks source rock
 
-`lua-polars-0.20.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.21.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -1074,13 +1185,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.20.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.21.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.20.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.21.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
@@ -1125,6 +1236,9 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] CSV reader empty-file handling with `raise_if_empty = false`.
 - [x] DataFrame NaN filling and dropping with column subsets.
 - [x] DataFrame row reversal and strict column casting.
+- [x] DataFrame row shifting and numeric clipping.
+- [x] Duplicate and unique row markers.
+- [x] CSV schema-inference length control.
 - [x] Distinct rows with column subsets and keep strategies.
 - [x] List-column explode with null/empty-list controls.
 - [x] CSV writer delimiter, header, and null-value options.

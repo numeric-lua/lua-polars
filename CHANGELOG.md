@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.21.0
+
+- five DataFrame/IO additions:
+  - `df:shift(periods [, columns])` shifts values by a row count, inserting
+    nulls at the start for positive periods and at the end for negative ones;
+    every column shifts by default, and a validated subset leaves the other
+    columns in place;
+  - `df:clip(minimum, maximum [, columns])` clamps numeric values to an
+    inclusive finite range while preserving nulls and column order; every
+    numeric column is clipped by default, explicit subsets must be numeric, and
+    non-integral bounds on integer columns are rejected;
+  - `df:is_duplicated([name])` appends a Boolean marker that is true for rows
+    whose full value repeats, with a default `duplicated` name;
+  - `df:is_unique([name])` appends the inverse Boolean marker for rows that
+    occur exactly once, with a default `unique` name;
+  - `polars.read_csv(..., { infer_schema_length = n })` limits the rows used
+    for dtype inference, with `0` forcing every column to `str`; it composes
+    with projection, renames, dtypes, row windows, and every earlier option;
+- the additive C ABI entry points are `pl_dataframe_shift`,
+  `pl_dataframe_clip`, `pl_dataframe_is_duplicated`, `pl_dataframe_is_unique`,
+  and `pl_dataframe_read_csv_inferred`; every earlier signature and default is
+  unchanged;
+- validation covers non-integer shift periods, malformed or duplicate column
+  subsets, non-finite or reversed clip bounds, fractional integer clip bounds,
+  non-numeric clip columns, empty/colliding/non-string marker names,
+  negative/fractional/above-`2^53 - 1` inference lengths, and closed frames;
+- tests cover shift direction and subset isolation, clip bounds and null
+  preservation on integer and float columns, duplicate/unique marker values and
+  custom names, schema inference with `0`, `1`, dtype overrides and combined
+  reader options, and every new error path, including the installed-prefix
+  smoke test;
+- `./scripts/test.sh` passed 164 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validate the installed-prefix and LuaRocks layouts
+  for 0.21.0-1;
+- the 0.21.0 tag is created for this release.
+
 ## 0.20.0
 
 - five DataFrame/IO additions:

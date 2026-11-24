@@ -85,10 +85,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.20.0")
+  eq(polars.version(), "0.21.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.20.0")
+  eq(polars._VERSION, "0.21.0")
 end)
 
 current = "csv"
@@ -3013,6 +3013,299 @@ test("CSV writer BOM and decimal options reject non-booleans", function()
   end)
   eq(ok, false, "closed include_bom accepted")
   truthy(tostring(err):find("closed", 1, true), "closed include_bom error")
+end)
+
+test("shift moves values and preserves the schema", function()
+  local df = polars.read_csv(fixture)
+  local shifted = df:shift(1)
+  eq(shifted:shape(), df:shape())
+  eq(table.concat(shifted:columns(), ","), "name,team,score,active")
+  eq(shifted:schema().score, "i64")
+  local rows = shifted:to_table()
+  eq(rows[1].name, polars.null)
+  eq(rows[1].team, polars.null)
+  eq(rows[1].score, polars.null)
+  eq(rows[1].active, polars.null)
+  eq(rows[2].name, "ana")
+  eq(rows[2].score, 10)
+  eq(rows[5].name, "duda")
+  shifted:close()
+
+  local subset = df:shift(-1, { "score" })
+  eq(table.concat(subset:columns(), ","), "name,team,score,active")
+  rows = subset:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].score, 7)
+  eq(rows[2].score, 12)
+  eq(rows[4].score, 9)
+  eq(rows[5].score, polars.null)
+  subset:close()
+
+  local unchanged = df:shift(0)
+  eq(unchanged:to_table()[1].name, "ana")
+  eq(unchanged:to_table()[5].score, 9)
+  unchanged:close()
+  eq(df:to_table()[1].name, "ana", "shift changed the input frame")
+  df:close()
+end)
+
+test("shift rejects invalid periods and subsets", function()
+  local df = polars.read_csv(fixture)
+  for _, period in ipairs({ 1.5, "1", true, {}, math.huge,
+      9007199254740992 }) do
+    local ok, err = pcall(function() df:shift(period) end)
+    eq(ok, false, "invalid shift period accepted")
+    truthy(tostring(err):find("integer", 1, true),
+      "shift period error: " .. tostring(err))
+  end
+  local cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "score", [3] = "active" }, "contiguous list" },
+    { { "score", "score" }, "duplicate shift column 'score'" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:shift(1, case[1]) end)
+    eq(ok, false, "invalid shift subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:shift(1) end)
+  eq(ok, false, "closed shift accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed shift error")
+end)
+
+test("clip clamps numeric columns and preserves nulls", function()
+  local df = polars.read_csv(fixture)
+  local clipped = df:clip(7, 10)
+  eq(clipped:shape(), df:shape())
+  eq(table.concat(clipped:columns(), ","), "name,team,score,active")
+  eq(clipped:schema().score, "i64")
+  local rows = clipped:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[2].score, 7)
+  eq(rows[3].score, 10)
+  eq(rows[4].score, 7)
+  eq(rows[5].score, 9)
+  eq(rows[1].name, "ana")
+  eq(rows[4].active, true)
+  clipped:close()
+
+  local floated = df:sql([[
+    SELECT "score",
+           CASE WHEN "score" = 5 THEN NULL
+                ELSE CAST("score" AS DOUBLE) END AS "f"
+    FROM df
+  ]])
+  local finite = floated:clip(8, 10, "f")
+  eq(finite:schema().f, "f64")
+  rows = finite:to_table()
+  eq(rows[1].f, 10)
+  eq(rows[2].f, 8)
+  eq(rows[3].f, 10)
+  eq(rows[4].f, polars.null, "clip replaced a null")
+  eq(rows[5].f, 9)
+  finite:close()
+
+  local only_numbers = df:sql('SELECT "name", "score" FROM df')
+  local unchanged = only_numbers:clip(0, 100)
+  eq(unchanged:to_table()[1].name, "ana")
+  eq(unchanged:to_table()[3].score, 12)
+  unchanged:close()
+  only_numbers:close()
+  floated:close()
+  eq(df:to_table()[3].score, 12, "clip changed the input frame")
+  df:close()
+end)
+
+test("clip rejects invalid bounds and subsets", function()
+  local df = polars.read_csv(fixture)
+  local value_cases = {
+    { "7", 10, "finite number" },
+    { 0 / 0, 10, "finite number" },
+    { math.huge, 10, "finite number" },
+    { 0, -math.huge, "finite number" },
+    { 10, 7, "must not be greater than maximum" },
+    { 2.5, 8, "must be an integer" },
+  }
+  for _, case in ipairs(value_cases) do
+    local ok, err = pcall(function() df:clip(case[1], case[2]) end)
+    eq(ok, false, "invalid clip bound accepted")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  local subset_cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "score", [3] = "active" }, "contiguous list" },
+    { { "score", "score" }, "duplicate clip column 'score'" },
+    { { "missing" }, "is not a column in the DataFrame" },
+    { { "name" }, "expected a numeric column" },
+  }
+  for _, case in ipairs(subset_cases) do
+    local ok, err = pcall(function() df:clip(0, 10, case[1]) end)
+    eq(ok, false, "invalid clip subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:clip(0, 10) end)
+  eq(ok, false, "closed clip accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed clip error")
+end)
+
+test("is_duplicated and is_unique append Boolean markers", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,team\n1,red\n1,red\n2,blue\n3,green\n2,blue\n")
+  file:close()
+  local df = polars.read_csv(path)
+
+  local duplicated = df:is_duplicated()
+  eq(table.concat(duplicated:columns(), ","), "id,team,duplicated")
+  local rows = duplicated:to_table()
+  eq(rows[1].duplicated, true)
+  eq(rows[2].duplicated, true)
+  eq(rows[3].duplicated, true)
+  eq(rows[4].duplicated, false)
+  eq(rows[5].duplicated, true)
+  duplicated:close()
+
+  local unique = df:is_unique("only")
+  eq(table.concat(unique:columns(), ","), "id,team,only")
+  rows = unique:to_table()
+  eq(rows[1].only, false)
+  eq(rows[3].only, false)
+  eq(rows[4].only, true)
+  unique:close()
+
+  local renamed = df:is_duplicated("repeat")
+  eq(renamed:columns()[3], "repeat")
+  renamed:close()
+  eq(table.concat(df:columns(), ","), "id,team",
+    "duplicate marker changed the input frame")
+  df:close()
+
+  local single = polars.read_csv(path):head(1)
+  eq(single:is_unique():to_table()[1].unique, true)
+  single:close()
+end)
+
+test("is_duplicated and is_unique reject names and closed frames", function()
+  local df = polars.read_csv(fixture)
+  local ok, err = pcall(function() df:is_duplicated("score") end)
+  eq(ok, false, "colliding duplicate marker name accepted")
+  truthy(tostring(err):find("already exists", 1, true),
+    "duplicate marker collision error: " .. tostring(err))
+  ok, err = pcall(function() df:is_unique("team") end)
+  eq(ok, false, "colliding unique marker name accepted")
+  truthy(tostring(err):find("already exists", 1, true),
+    "unique marker collision error: " .. tostring(err))
+  for _, value in ipairs({ "", 42, true, {} }) do
+    ok, err = pcall(function() df:is_duplicated(value) end)
+    eq(ok, false, "invalid duplicate marker name accepted")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      "duplicate marker name error: " .. tostring(err))
+    ok, err = pcall(function() df:is_unique(value) end)
+    eq(ok, false, "invalid unique marker name accepted")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      "unique marker name error: " .. tostring(err))
+  end
+  df:close()
+  ok, err = pcall(function() df:is_duplicated() end)
+  eq(ok, false, "closed is_duplicated accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed is_duplicated error")
+  ok, err = pcall(function() df:is_unique() end)
+  eq(ok, false, "closed is_unique accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed is_unique error")
+end)
+
+test("read_csv infer_schema_length controls dtype inference", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,score\n1,10\n2,20\n3,30\n")
+  file:close()
+
+  local default = polars.read_csv(path)
+  eq(default:schema().score, "i64")
+  eq(default:to_table()[1].score, 10)
+  default:close()
+
+  local strings = polars.read_csv(path, { infer_schema_length = 0 })
+  eq(strings:schema().id, "str")
+  eq(strings:schema().score, "str")
+  eq(strings:to_table()[1].score, "10")
+  strings:close()
+
+  local first_row = polars.read_csv(path, { infer_schema_length = 1 })
+  eq(first_row:schema().score, "i64")
+  eq(first_row:to_table()[3].score, 30)
+  first_row:close()
+
+  local typed = polars.read_csv(path, {
+    infer_schema_length = 0,
+    dtypes = { score = "i64" },
+  })
+  eq(typed:schema().score, "i64")
+  eq(typed:to_table()[1].score, 10)
+  typed:close()
+
+  local combined = polars.read_csv(path, {
+    infer_schema_length = 0,
+    columns = { "score", "id" },
+    rename_columns = { "points", "key" },
+    n_rows = 2,
+  })
+  eq(table.concat(combined:columns(), ","), "points,key")
+  eq(combined:schema().points, "str")
+  eq(combined:shape(), 2)
+  eq(combined:to_table()[1].points, "10")
+  combined:close()
+
+  local headerless_path = new_temp_path(".csv")
+  local headerless_file = assert(io.open(headerless_path, "w"))
+  headerless_file:write("1;10\n2;20\n")
+  headerless_file:close()
+  local headerless = polars.read_csv(headerless_path, {
+    delimiter = ";",
+    header = false,
+    infer_schema_length = 0,
+    n_rows = 1,
+  })
+  eq(headerless:schema().column_1, "str")
+  eq(headerless:schema().column_2, "str")
+  eq(headerless:shape(), 1)
+  headerless:close()
+
+  local empty_path = new_temp_path(".csv")
+  local empty_file = assert(io.open(empty_path, "w"))
+  empty_file:close()
+  local relaxed = polars.read_csv(empty_path, {
+    infer_schema_length = 0,
+    raise_if_empty = false,
+  })
+  eq(relaxed:shape(), 0)
+  relaxed:close()
+end)
+
+test("read_csv infer_schema_length rejects invalid values", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,score\n1,10\n")
+  file:close()
+  for _, value in ipairs({ -1, 1.5, "1", true, {}, math.huge, 0 / 0,
+      9007199254740992 }) do
+    local ok, err = pcall(polars.read_csv, path, {
+      infer_schema_length = value,
+    })
+    eq(ok, false, "invalid infer_schema_length accepted")
+    truthy(tostring(err):find("infer_schema_length", 1, true),
+      "infer_schema_length option name: " .. tostring(err))
+    truthy(tostring(err):find("non-negative integer", 1, true),
+      "infer_schema_length guidance: " .. tostring(err))
+  end
 end)
 
 cleanup_temp_files()

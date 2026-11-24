@@ -115,6 +115,20 @@ PlFrame *pl_dataframe_read_csv_empty_policy(
     const char *encoding, int32_t try_parse_dates,
     int32_t decimal_comma, int32_t truncate_ragged_lines,
     int32_t ignore_errors, int32_t raise_if_empty, char **err);
+PlFrame *pl_dataframe_read_csv_inferred(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, uint64_t skip_rows_after_header, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t decimal_comma, int32_t truncate_ragged_lines,
+    int32_t ignore_errors, int32_t raise_if_empty,
+    int64_t infer_schema_length, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -133,6 +147,12 @@ PlFrame *pl_dataframe_slice(
 PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_shift(
+    PlFrame *frame, int64_t periods, const char *const *columns,
+    uint64_t column_count, char **err);
+PlFrame *pl_dataframe_clip(
+    PlFrame *frame, double minimum, double maximum, const char *const *columns,
+    uint64_t column_count, char **err);
 PlFrame *pl_dataframe_cast(
     PlFrame *frame, const char *const *pairs, uint64_t pair_count, char **err);
 PlFrame *pl_dataframe_fill_nan(
@@ -141,6 +161,10 @@ PlFrame *pl_dataframe_fill_nan(
 PlFrame *pl_dataframe_drop_nans(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     char **err);
+PlFrame *pl_dataframe_is_duplicated(
+    PlFrame *frame, const char *name, char **err);
+PlFrame *pl_dataframe_is_unique(
+    PlFrame *frame, const char *name, char **err);
 PlFrame *pl_dataframe_unique(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     const char *keep, int32_t maintain_order, char **err);
@@ -1045,6 +1069,84 @@ function DataFrame:drop_nans(columns)
   return new_frame(pointer, err)
 end
 
+-- Positive periods move values toward later rows and insert nulls at the
+-- start; negative periods move them toward earlier rows and insert nulls at the
+-- end. With no columns every column shifts, matching Polars' DataFrame shift.
+function DataFrame:shift(periods, columns)
+  if type(periods) ~= "number" or periods % 1 ~= 0 or
+      periods < -MAX_SAFE_INTEGER or periods > MAX_SAFE_INTEGER then
+    error("shift periods must be an integer", 2)
+  end
+  local selected = subset_columns(self, columns, "shift")
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_shift(self:_require_open(), periods, names,
+    count, err)
+  return new_frame(pointer, err)
+end
+
+-- Both bounds are inclusive and must be finite. An explicit subset may only
+-- name numeric columns; with no columns every numeric column is clipped and
+-- string/boolean columns are left unchanged.
+function DataFrame:clip(minimum, maximum, columns)
+  if type(minimum) ~= "number" or minimum ~= minimum or
+      minimum == math.huge or minimum == -math.huge then
+    error("clip minimum must be a finite number", 2)
+  end
+  if type(maximum) ~= "number" or maximum ~= maximum or
+      maximum == math.huge or maximum == -math.huge then
+    error("clip maximum must be a finite number", 2)
+  end
+  if minimum > maximum then
+    error("clip minimum must not be greater than maximum", 2)
+  end
+  local selected = subset_columns(self, columns, "clip")
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_clip(self:_require_open(), minimum, maximum,
+    names, count, err)
+  return new_frame(pointer, err)
+end
+
+-- The marker is appended after the existing columns. It is true when the
+-- complete row value repeats, and false for a row that occurs once.
+function DataFrame:is_duplicated(name)
+  name = name == nil and "duplicated" or name
+  if type(name) ~= "string" or name == "" then
+    error("is_duplicated name must be a non-empty string", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_is_duplicated(self:_require_open(), name, err)
+  return new_frame(pointer, err)
+end
+
+-- The inverse of is_duplicated: true marks rows whose full value occurs once.
+function DataFrame:is_unique(name)
+  name = name == nil and "unique" or name
+  if type(name) ~= "string" or name == "" then
+    error("is_unique name must be a non-empty string", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_is_unique(self:_require_open(), name, err)
+  return new_frame(pointer, err)
+end
+
 local VALUE_COUNT_OPTION_KEYS = {
   sort = true,
   name = true,
@@ -1405,7 +1507,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.20.0",
+  _VERSION = "0.21.0",
   null = json.null,
   DataFrame = DataFrame,
 }
@@ -1432,6 +1534,7 @@ local CSV_OPTION_KEYS = {
   truncate_ragged_lines = true,
   ignore_errors = true,
   raise_if_empty = true,
+  infer_schema_length = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -1757,10 +1860,25 @@ local function csv_raise_if_empty(options)
   return value
 end
 
+-- Polars infers dtypes from the first 100 data rows by default. A non-negative
+-- count narrows or widens that window; zero means every column is read as a
+-- string. An absent option keeps the default and uses the earlier reader path.
+local function csv_infer_schema_length(options)
+  local value = options.infer_schema_length
+  if value == nil then
+    return nil
+  end
+  if type(value) ~= "number" or value < 0 or value % 1 ~= 0 or
+      value > MAX_SAFE_INTEGER then
+    error("read_csv infer_schema_length must be a non-negative integer", 3)
+  end
+  return value
+end
+
 local function csv_options(options)
   if options == nil then
     return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil,
-      nil, nil, false, false, false, 0, false, true
+      nil, nil, false, false, false, 0, false, true, nil
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -1796,11 +1914,12 @@ local function csv_options(options)
   local skip_rows_after_header = csv_skip_rows_after_header(options)
   local decimal_comma = csv_boolean_option(options, "decimal_comma")
   local raise_if_empty = csv_raise_if_empty(options)
+  local infer_schema_length = csv_infer_schema_length(options)
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
     try_parse_dates, truncate_ragged_lines, ignore_errors,
-    skip_rows_after_header, decimal_comma, raise_if_empty
+    skip_rows_after_header, decimal_comma, raise_if_empty, infer_schema_length
 end
 
 function polars.read_csv(path, options)
@@ -1811,7 +1930,8 @@ function polars.read_csv(path, options)
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
     try_parse_dates, truncate_ragged_lines, ignore_errors,
-    skip_rows_after_header, decimal_comma, raise_if_empty = csv_options(options)
+    skip_rows_after_header, decimal_comma, raise_if_empty,
+    infer_schema_length = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -1852,7 +1972,17 @@ function polars.read_csv(path, options)
     end
   end
   local pointer
-  if not raise_if_empty then
+  if infer_schema_length ~= nil then
+    pointer = lib.pl_dataframe_read_csv_inferred(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, named_columns,
+      named_markers, named_null_columns and #named_null_columns or 0,
+      skip_rows, skip_rows_after_header, n_rows, renames,
+      rename_columns and #rename_columns or 0, encoding,
+      try_parse_dates and 1 or 0, decimal_comma and 1 or 0,
+      truncate_ragged_lines and 1 or 0, ignore_errors and 1 or 0,
+      raise_if_empty and 1 or 0, infer_schema_length, err)
+  elseif not raise_if_empty then
     pointer = lib.pl_dataframe_read_csv_empty_policy(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, markers, null_value_count, named_columns,

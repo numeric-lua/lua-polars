@@ -54,6 +54,7 @@ struct CsvReadConfig {
     skip_rows: usize,
     skip_rows_after_header: usize,
     n_rows: Option<usize>,
+    infer_schema_length: Option<usize>,
     encoding: CsvEncoding,
     try_parse_dates: bool,
     decimal_comma: bool,
@@ -77,6 +78,7 @@ impl Default for CsvReadConfig {
             skip_rows: 0,
             skip_rows_after_header: 0,
             n_rows: None,
+            infer_schema_length: Some(100),
             encoding: CsvEncoding::Utf8,
             try_parse_dates: false,
             decimal_comma: false,
@@ -659,6 +661,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
         .with_skip_rows(config.skip_rows)
         .with_skip_rows_after_header(config.skip_rows_after_header)
         .with_n_rows(config.n_rows)
+        .with_infer_schema_length(config.infer_schema_length)
         .with_columns(columns)
         .with_schema_overwrite(schema_overwrite)
         .with_ignore_errors(config.ignore_errors)
@@ -1572,6 +1575,83 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_empty_policy(
     finish_frame(result, err)
 }
 
+/// Reads a CSV file with every earlier reader option plus schema inference
+/// length.
+///
+/// The arguments match [`pl_dataframe_read_csv_empty_policy`] and keep the same
+/// meaning and defaults. `infer_schema_length` is the number of data rows used
+/// to infer dtypes; `-1` keeps Polars' default of 100 rows, `0` treats every
+/// column as a string, and a positive value limits inference to that many rows.
+/// The parser still reads the whole requested row window after inference. This
+/// entry point is additive; every earlier reader signature and default is
+/// unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_inferred(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    null_columns: *const *const c_char,
+    named_null_values: *const *const c_char,
+    named_null_value_count: u64,
+    skip_rows: u64,
+    skip_rows_after_header: u64,
+    n_rows: i64,
+    rename_columns: *const *const c_char,
+    rename_column_count: u64,
+    encoding: *const c_char,
+    try_parse_dates: i32,
+    decimal_comma: i32,
+    truncate_ragged_lines: i32,
+    ignore_errors: i32,
+    raise_if_empty: i32,
+    infer_schema_length: i64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
+            skip_rows,
+            n_rows,
+        )?;
+        config.skip_rows_after_header = usize::try_from(skip_rows_after_header)
+            .map_err(|_| "CSV skip_rows_after_header is too large for this platform".to_string())?;
+        config.encoding = read_csv_encoding(encoding)?;
+        config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
+        config.named_null_values =
+            read_csv_named_null_values(null_columns, named_null_values, named_null_value_count)?;
+        config.try_parse_dates = try_parse_dates != 0;
+        config.decimal_comma = decimal_comma != 0;
+        config.truncate_ragged_lines = truncate_ragged_lines != 0;
+        config.ignore_errors = ignore_errors != 0;
+        config.raise_if_empty = raise_if_empty != 0;
+        if infer_schema_length >= 0 {
+            config.infer_schema_length = Some(usize::try_from(infer_schema_length).map_err(
+                |_| "CSV infer_schema_length is too large for this platform".to_string(),
+            )?);
+        }
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_parquet(
     path: *const c_char,
@@ -1916,6 +1996,160 @@ pub unsafe extern "C" fn pl_dataframe_reverse(
     finish_frame(result, err)
 }
 
+/// Shifts column values by a number of rows.
+///
+/// A null/zero `columns` count shifts every column; otherwise only the named
+/// columns move and the other columns keep their values. Positive periods move
+/// values toward higher row indexes and insert nulls at the start; negative
+/// periods move them toward lower indexes and insert nulls at the end. The
+/// result keeps the column order, names, and dtypes of the input. This entry
+/// point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_shift(
+    ptr: *mut PlFrame,
+    periods: i64,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let names = read_name_list(columns, column_count, "shift columns")?;
+        if names.is_empty() {
+            return Ok(frame.df.shift(periods));
+        }
+        let mut output = frame.df.clone();
+        for name in &names {
+            let index = output.get_column_index(name.as_str()).ok_or_else(|| {
+                format!("shift column '{name}' is not a column in the DataFrame")
+            })?;
+            let shifted = output.columns()[index].shift(periods);
+            output
+                .with_column(shifted)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(output)
+    }));
+    finish_frame(result, err)
+}
+
+/// Rejects a fractional clip bound for an integer column.
+///
+/// Polars would otherwise truncate the bound during its dtype cast, which can
+/// move the effective range without telling the caller.
+fn validate_clip_bound(
+    dtype: &DataType,
+    value: f64,
+    label: &str,
+    column: &str,
+) -> Result<(), String> {
+    if matches!(
+        dtype,
+        DataType::Int32 | DataType::Int64 | DataType::UInt32 | DataType::UInt64
+    ) && value.fract() != 0.0
+    {
+        return Err(format!(
+            "clip {label} for integer column '{column}' must be an integer, got {value}"
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves the numeric columns a `clip` operation should touch.
+///
+/// An empty request means every primitive numeric column in frame order.
+/// Explicit names are checked against the frame and must themselves be
+/// numeric; Boolean and string columns are not silently ignored.
+fn numeric_target_columns(
+    df: &DataFrame,
+    requested: &[String],
+    operation: &str,
+) -> Result<Vec<String>, String> {
+    let is_numeric = |column: &Column| column.dtype().to_physical().is_primitive_numeric();
+    if requested.is_empty() {
+        return Ok(df
+            .columns()
+            .iter()
+            .filter(|column| is_numeric(column))
+            .map(|column| column.name().to_string())
+            .collect());
+    }
+    let mut names = Vec::with_capacity(requested.len());
+    for name in requested {
+        let column = df
+            .column(name.as_str())
+            .map_err(|_| format!("{operation} column '{name}' is not a column in the DataFrame"))?;
+        if !is_numeric(column) {
+            return Err(format!(
+                "{operation} column '{name}' has dtype {}; expected a numeric column",
+                column.dtype()
+            ));
+        }
+        names.push(name.clone());
+    }
+    Ok(names)
+}
+
+/// Clamps numeric values to an inclusive `[minimum, maximum]` range.
+///
+/// A null/zero `columns` count clips every primitive numeric column; a name or
+/// list limits the operation and rejects non-numeric columns. Nulls are
+/// preserved, the input frame is unchanged, and column order is preserved.
+/// Bounds must be finite and ordered; they are cast to each target dtype, so a
+/// non-integral bound on an integer column is an error. This entry point is
+/// additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_clip(
+    ptr: *mut PlFrame,
+    minimum: f64,
+    maximum: f64,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        if !minimum.is_finite() {
+            return Err("clip minimum must be finite".to_string());
+        }
+        if !maximum.is_finite() {
+            return Err("clip maximum must be finite".to_string());
+        }
+        if minimum > maximum {
+            return Err("clip minimum must not be greater than maximum".to_string());
+        }
+        let requested = read_name_list(columns, column_count, "clip columns")?;
+        let names = numeric_target_columns(&frame.df, &requested, "clip")?;
+        if names.is_empty() {
+            return Ok(frame.df.clone());
+        }
+        let mut output = frame.df.clone();
+        for name in &names {
+            let index = output.get_column_index(name.as_str()).ok_or_else(|| {
+                format!("clip column '{name}' is not a column in the DataFrame")
+            })?;
+            let current = output.columns()[index].clone();
+            validate_clip_bound(current.dtype(), minimum, "minimum", name)?;
+            validate_clip_bound(current.dtype(), maximum, "maximum", name)?;
+            let min_series = Series::new(PlSmallStr::from_str("clip_min"), &[minimum]);
+            let max_series = Series::new(PlSmallStr::from_str("clip_max"), &[maximum]);
+            let clipped = clip(
+                current.as_materialized_series(),
+                &min_series,
+                &max_series,
+            )
+            .map_err(|error| {
+                format!("could not clip column '{name}' to [{minimum}, {maximum}]: {error}")
+            })?;
+            output
+                .with_column(clipped.into_column())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(output)
+    }));
+    finish_frame(result, err)
+}
+
 /// Casts one or more columns to new dtypes.
 ///
 /// `pairs` is a flat array of `column`, `dtype` string pairs and `pair_count`
@@ -2106,6 +2340,86 @@ pub unsafe extern "C" fn pl_dataframe_drop_nans(
             .filter(predicate.expect("at least one NaN column"))
             .collect()
             .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
+/// Appends a Boolean duplicate marker to a frame.
+///
+/// `name` is the marker column name; a null pointer keeps the supplied default.
+/// The name must be non-empty and must not collide with an existing column.
+/// `unique` selects the inverse mask: true marks rows that occur exactly once,
+/// false marks rows whose full row value repeats. The input frame is unchanged
+/// and the marker is appended after the existing columns.
+unsafe fn duplicate_marker_frame(
+    frame: &DataFrame,
+    name: *const c_char,
+    default_name: &str,
+    unique: bool,
+) -> Result<DataFrame, String> {
+    let name = if name.is_null() {
+        default_name.to_string()
+    } else {
+        read_utf8(name, "duplicate marker name")?
+    };
+    if name.is_empty() {
+        return Err("duplicate marker name must not be empty".to_string());
+    }
+    if frame.get_column_index(name.as_str()).is_some() {
+        return Err(format!(
+            "duplicate marker column '{name}' already exists in the DataFrame"
+        ));
+    }
+    let mask = if unique {
+        frame.is_unique()
+    } else {
+        frame.is_duplicated()
+    }
+    .map_err(|error| error.to_string())?;
+    let mut output = frame.clone();
+    let mut marker = mask.into_column();
+    // The mask arrives named `is_unique`/`is_duplicated`; rename it before
+    // appending so an existing column with that name is never replaced.
+    marker.rename(PlSmallStr::from_str(&name));
+    output
+        .with_column(marker)
+        .map_err(|error| error.to_string())?;
+    Ok(output)
+}
+
+/// Appends a Boolean column marking duplicated rows.
+///
+/// The marker is true for every row whose full row value occurs more than
+/// once. A null `name` keeps the default `duplicated`; an explicit name must be
+/// non-empty and must not collide with an existing column. This entry point is
+/// additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_is_duplicated(
+    ptr: *mut PlFrame,
+    name: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        duplicate_marker_frame(&frame.df, name, "duplicated", false)
+    }));
+    finish_frame(result, err)
+}
+
+/// Appends a Boolean column marking unique rows.
+///
+/// The marker is true for rows whose full row value occurs exactly once. A null
+/// `name` keeps the default `unique`; an explicit name must be non-empty and
+/// must not collide with an existing column. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_is_unique(
+    ptr: *mut PlFrame,
+    name: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        duplicate_marker_frame(&frame.df, name, "unique", true)
     }));
     finish_frame(result, err)
 }

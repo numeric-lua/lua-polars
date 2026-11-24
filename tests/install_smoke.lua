@@ -18,8 +18,8 @@ check(source:sub(1, 1) == "@", "module source is not a file path")
 local module_path = source:sub(2)
 check(module_path:sub(1, #prefix) == prefix,
   "loaded polars from outside the installed prefix: " .. module_path)
-check(polars.version() == "0.20.0", "unexpected bridge version")
-check(polars._VERSION == "0.20.0", "unexpected Lua module version")
+check(polars.version() == "0.21.0", "unexpected bridge version")
+check(polars._VERSION == "0.21.0", "unexpected Lua module version")
 
 local df = polars.read_csv(fixture)
 local rows, cols = df:shape()
@@ -56,6 +56,35 @@ local teams = transforms:unique("team")
 check(teams:shape() == 2, "unexpected unique subset shape")
 teams:close()
 transforms:close()
+
+local row_tools = polars.read_csv(fixture)
+local shifted = row_tools:shift(1)
+check(shifted:to_table()[1].score == polars.null,
+  "shift did not insert a leading null")
+check(shifted:to_table()[2].score == 10, "unexpected shifted value")
+shifted:close()
+local clipped = row_tools:clip(7, 10)
+check(clipped:to_table()[3].score == 10, "unexpected clipped value")
+check(clipped:to_table()[4].score == 7, "unexpected clipped lower bound")
+clipped:close()
+local duplicated = row_tools:is_duplicated()
+check(duplicated:columns()[5] == "duplicated",
+  "duplicate marker was not appended")
+check(duplicated:to_table()[1].duplicated == false,
+  "unexpected duplicate marker value")
+duplicated:close()
+local unique_rows = row_tools:is_unique()
+check(unique_rows:to_table()[1].unique == true,
+  "unexpected unique marker value")
+unique_rows:close()
+row_tools:close()
+
+local string_schema = polars.read_csv(fixture, { infer_schema_length = 0 })
+check(string_schema:schema().score == "str",
+  "infer_schema_length did not force string inference")
+check(string_schema:to_table()[1].score == "10",
+  "unexpected inferred string value")
+string_schema:close()
 
 local nan_source = polars.read_csv(fixture)
 local nan = nan_source:sql([[
