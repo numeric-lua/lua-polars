@@ -85,10 +85,10 @@ end
 
 current = "module"
 test("version is exposed", function()
-  eq(polars.version(), "0.23.0")
+  eq(polars.version(), "0.24.0")
 end)
 test("package version", function()
-  eq(polars._VERSION, "0.23.0")
+  eq(polars._VERSION, "0.24.0")
 end)
 
 current = "csv"
@@ -3796,6 +3796,233 @@ test("read_parquet low_memory preserves results", function()
   eq(ok, false, "non-boolean low_memory accepted")
   truthy(tostring(err):find("low_memory", 1, true),
     "low_memory option error: " .. tostring(err))
+  df:close()
+end)
+
+test("estimated_size reports frame bytes", function()
+  local df = polars.read_csv(fixture)
+  local bytes = df:estimated_size()
+  eq(type(bytes), "number")
+  truthy(bytes > 0, "estimated_size should be positive for a non-empty frame")
+  df:close()
+  local ok, err = pcall(function() df:estimated_size() end)
+  eq(ok, false, "closed estimated_size accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed estimated_size error")
+end)
+
+test("transpose turns columns into rows", function()
+  local df = polars.read_csv(fixture)
+  local numeric = df:sql([[
+    SELECT "score", CAST("score" AS DOUBLE) AS "f" FROM df
+  ]])
+  local transposed = numeric:transpose()
+  local rows, cols = transposed:shape()
+  eq(rows, 2)
+  eq(cols, 5)
+  eq(table.concat(transposed:columns(), ","),
+    "column_0,column_1,column_2,column_3,column_4")
+  eq(transposed:schema().column_0, "f64")
+  local table_rows = transposed:to_table()
+  eq(table_rows[1].column_0, 10)
+  eq(table_rows[1].column_4, 9)
+  eq(table_rows[2].column_0, 10)
+  transposed:close()
+
+  local named = numeric:transpose({ keep_names_as = "field" })
+  local named_rows_count, named_cols = named:shape()
+  eq(named_rows_count, 2)
+  eq(named_cols, 6)
+  eq(named:columns()[1], "field")
+  local named_rows = named:to_table()
+  eq(named_rows[1].field, "score")
+  eq(named_rows[2].field, "f")
+  named:close()
+
+  eq(select(1, numeric:shape()), 5)
+  numeric:close()
+  df:close()
+end)
+
+test("transpose rejects invalid options and empty frames", function()
+  local df = polars.read_csv(fixture)
+  local ok, err = pcall(function()
+    df:transpose({ keep_names_as = "" })
+  end)
+  eq(ok, false, "empty transpose name accepted")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "transpose name error: " .. tostring(err))
+  ok, err = pcall(function() df:transpose({ names = true }) end)
+  eq(ok, false, "unknown transpose option accepted")
+  truthy(tostring(err):find("unknown field", 1, true),
+    "transpose option error: " .. tostring(err))
+  ok, err = pcall(function() df:transpose(42) end)
+  eq(ok, false, "non-table transpose options accepted")
+  truthy(tostring(err):find("options must be a table", 1, true),
+    "transpose table error: " .. tostring(err))
+  local empty = df:head(0)
+  ok, err = pcall(function() empty:transpose() end)
+  eq(ok, false, "empty transpose accepted")
+  truthy(tostring(err):find("empty", 1, true),
+    "empty transpose error: " .. tostring(err))
+  empty:close()
+  df:close()
+  ok, err = pcall(function() df:transpose() end)
+  eq(ok, false, "closed transpose accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed transpose error")
+end)
+
+test("is_sorted checks keys and directions", function()
+  local df = polars.read_csv(fixture)
+  eq(df:is_sorted("name"), true)
+  eq(df:is_sorted("score"), false)
+  local ascending = df:sort("score", false)
+  eq(ascending:is_sorted("score"), true)
+  ascending:close()
+  local descending = df:sort("score", true)
+  eq(descending:is_sorted("score", true), true)
+  eq(descending:is_sorted("score", false), false)
+  descending:close()
+  local paired = df:sort({ "team", "score" }, { false, false })
+  eq(paired:is_sorted({ "team", "score" }, { false, false }), true)
+  paired:close()
+  eq(df:is_sorted("score", true, true), false)
+  df:close()
+end)
+
+test("is_sorted rejects invalid arguments", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { false, "columns must be a column name" },
+    { 42, "columns must be a column name" },
+    { {}, "columns must not be empty" },
+    { { "missing" }, "is not a column in the DataFrame" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:is_sorted(case[1]) end)
+    eq(ok, false, "invalid is_sorted columns accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:is_sorted() end)
+  eq(ok, false, "is_sorted accepted missing columns")
+  truthy(tostring(err):find("columns must be a column name", 1, true),
+    "missing is_sorted columns error: " .. tostring(err))
+  ok, err = pcall(function()
+    df:is_sorted({ "team", "score" }, { true })
+  end)
+  eq(ok, false, "short descending list accepted")
+  truthy(tostring(err):find("match the column count", 1, true),
+    "descending count error: " .. tostring(err))
+  ok, err = pcall(function() df:is_sorted({ "team", "score" }, { false }) end)
+  eq(ok, false, "mismatched descending list accepted")
+  truthy(tostring(err):find("match the column count", 1, true),
+    "mismatched descending error: " .. tostring(err))
+  ok, err = pcall(function()
+    df:is_sorted({ "team", "score" }, { false, 1 })
+  end)
+  eq(ok, false, "non-boolean descending entry accepted")
+  truthy(tostring(err):find("entries must be booleans", 1, true),
+    "descending entry error: " .. tostring(err))
+  ok, err = pcall(function() df:is_sorted("score", "desc") end)
+  eq(ok, false, "non-boolean descending accepted")
+  truthy(tostring(err):find("descending must be", 1, true),
+    "descending type error: " .. tostring(err))
+  ok, err = pcall(function() df:is_sorted("score", false, "last") end)
+  eq(ok, false, "non-boolean nulls_last accepted")
+  truthy(tostring(err):find("nulls_last must be a boolean", 1, true),
+    "nulls_last error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:is_sorted("score") end)
+  eq(ok, false, "closed is_sorted accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed is_sorted error")
+end)
+
+test("read_json ignore_errors keeps unparsable lines", function()
+  local path = new_temp_path(".jsonl")
+  local file = assert(io.open(path, "w"))
+  file:write('{"x":1}\n{"x":2}\n{"x":"oops"}\n')
+  file:close()
+  local strict_ok, strict_err = pcall(polars.read_json, path, {
+    format = "lines",
+    infer_schema_length = 2,
+  })
+  eq(strict_ok, false, "strict JSON parse error was ignored")
+  truthy(tostring(strict_err):find("parse", 1, true) or
+    tostring(strict_err):find("Int64", 1, true),
+    "strict JSON error: " .. tostring(strict_err))
+
+  local lenient = polars.read_json(path, {
+    format = "lines",
+    infer_schema_length = 2,
+    ignore_errors = true,
+  })
+  eq(lenient:shape(), 3)
+  eq(lenient:schema().x, "i64")
+  local rows = lenient:to_table()
+  eq(rows[1].x, 1)
+  eq(rows[2].x, 2)
+  eq(rows[3].x, polars.null)
+  lenient:close()
+
+  local projected = polars.read_json(path, {
+    format = "lines",
+    infer_schema_length = 2,
+    ignore_errors = true,
+    columns = { "x" },
+  })
+  eq(table.concat(projected:columns(), ","), "x")
+  eq(projected:to_table()[3].x, polars.null)
+  projected:close()
+
+  local ok, err = pcall(polars.read_json, path, {
+    format = "lines",
+    ignore_errors = "true",
+  })
+  eq(ok, false, "non-boolean ignore_errors accepted")
+  truthy(tostring(err):find("ignore_errors", 1, true),
+    "ignore_errors option error: " .. tostring(err))
+
+  local array_path = new_temp_path(".json")
+  local array_file = assert(io.open(array_path, "w"))
+  array_file:write('[{"x":1}]')
+  array_file:close()
+  ok, err = pcall(polars.read_json, array_path, { ignore_errors = true })
+  eq(ok, false, "JSON array accepted ignore_errors")
+  truthy(tostring(err):find("ndjson", 1, true) or
+    tostring(err):find("ignore_errors", 1, true),
+    "array ignore_errors error: " .. tostring(err))
+end)
+
+test("read_parquet rechunk preserves results", function()
+  local df = polars.read_csv(fixture)
+  local path = new_temp_path(".parquet")
+  df:write_parquet(path, { compression = "snappy" })
+  local default = polars.read_parquet(path)
+  local rechunked = polars.read_parquet(path, { rechunk = true })
+  eq(rechunked:shape(), default:shape())
+  eq(table.concat(rechunked:columns(), ","),
+    table.concat(default:columns(), ","))
+  eq(rechunked:schema().score, default:schema().score)
+  eq(rechunked:to_table()[1].name, default:to_table()[1].name)
+  rechunked:close()
+  default:close()
+
+  local combined = polars.read_parquet(path, {
+    low_memory = true,
+    rechunk = true,
+    columns = { "score", "name" },
+    skip_rows = 1,
+    n_rows = 2,
+  })
+  eq(combined:shape(), 2)
+  eq(table.concat(combined:columns(), ","), "score,name")
+  eq(combined:to_table()[1].name, "bia")
+  combined:close()
+
+  local ok, err = pcall(polars.read_parquet, path, { rechunk = "true" })
+  eq(ok, false, "non-boolean rechunk accepted")
+  truthy(tostring(err):find("rechunk", 1, true),
+    "rechunk option error: " .. tostring(err))
   df:close()
 end)
 

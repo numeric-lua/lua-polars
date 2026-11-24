@@ -1708,6 +1708,7 @@ fn read_parquet_frame(
     skip_rows: u64,
     n_rows: i64,
     low_memory: bool,
+    rechunk: bool,
 ) -> Result<DataFrame, String> {
     let skip_rows: usize = skip_rows
         .try_into()
@@ -1729,7 +1730,11 @@ fn read_parquet_frame(
     if let Some(columns) = columns {
         reader = reader.with_columns(Some(columns));
     }
-    reader.finish().map_err(|error| error.to_string())
+    let mut frame = reader.finish().map_err(|error| error.to_string())?;
+    if rechunk {
+        frame.rechunk_mut_par();
+    }
+    Ok(frame)
 }
 
 /// Reads a Parquet file with a column projection and a row window.
@@ -1754,7 +1759,7 @@ pub unsafe extern "C" fn pl_dataframe_read_parquet_options(
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
         let path = read_path(path)?;
         let columns = read_parquet_columns(columns, column_count)?;
-        read_parquet_frame(&path, columns, skip_rows, n_rows, false)
+        read_parquet_frame(&path, columns, skip_rows, n_rows, false, false)
     }));
     finish_frame(result, err)
 }
@@ -1779,7 +1784,40 @@ pub unsafe extern "C" fn pl_dataframe_read_parquet_low_memory(
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
         let path = read_path(path)?;
         let columns = read_parquet_columns(columns, column_count)?;
-        read_parquet_frame(&path, columns, skip_rows, n_rows, low_memory != 0)
+        read_parquet_frame(&path, columns, skip_rows, n_rows, low_memory != 0, false)
+    }));
+    finish_frame(result, err)
+}
+
+/// Reads a Parquet file with projection, row window, and memory controls.
+///
+/// The arguments match [`pl_dataframe_read_parquet_options`] plus
+/// `low_memory` and `rechunk`. Non-zero `low_memory` selects Polars'
+/// lower-memory path; non-zero `rechunk` consolidates the result into a single
+/// chunk per column. Both preserve the schema and values. This entry point is
+/// additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_parquet_full(
+    path: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    skip_rows: u64,
+    n_rows: i64,
+    low_memory: i32,
+    rechunk: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let columns = read_parquet_columns(columns, column_count)?;
+        read_parquet_frame(
+            &path,
+            columns,
+            skip_rows,
+            n_rows,
+            low_memory != 0,
+            rechunk != 0,
+        )
     }));
     finish_frame(result, err)
 }
@@ -1909,6 +1947,64 @@ pub unsafe extern "C" fn pl_dataframe_read_json_inferred(
     finish_frame(result, err)
 }
 
+/// Reads a JSON array or JSON Lines file with inference and error controls.
+///
+/// The arguments match [`pl_dataframe_read_json_inferred`] plus
+/// `ignore_errors`. A non-zero `ignore_errors` keeps JSON Lines records whose
+/// values cannot be parsed by inserting nulls, matching Polars' lenient mode;
+/// JSON arrays reject the flag because Polars only supports it for lines.
+/// `infer_schema_length` keeps its `-1` default, `0` full-scan, and positive
+/// window meanings. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_json_full(
+    path: *const c_char,
+    json_lines: i32,
+    columns: *const *const c_char,
+    column_count: u64,
+    infer_schema_length: i64,
+    ignore_errors: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let columns = read_json_columns(columns, column_count)?;
+        if infer_schema_length < -1 {
+            return Err("JSON infer_schema_length must be -1 or a non-negative integer".to_string());
+        }
+        let file = File::open(&path).map_err(|error| error.to_string())?;
+        let mut reader = JsonReader::new(file)
+            .with_json_format(if json_lines != 0 {
+                JsonFormat::JsonLines
+            } else {
+                JsonFormat::Json
+            })
+            .with_ignore_errors(ignore_errors != 0);
+        if json_lines != 0 {
+            if infer_schema_length == 0 {
+                reader = reader.infer_schema_len(None);
+            } else if infer_schema_length > 0 {
+                let records = usize::try_from(infer_schema_length).map_err(|_| {
+                    "JSON infer_schema_length is too large for this platform".to_string()
+                })?;
+                let records = NonZeroUsize::new(records).ok_or_else(|| {
+                    "JSON infer_schema_length must be positive or zero".to_string()
+                })?;
+                reader = reader.infer_schema_len(Some(records));
+            }
+        }
+        if let Some(columns) = columns {
+            reader = reader.with_projection(Some(
+                columns
+                    .iter()
+                    .map(|name| PlSmallStr::from_str(name.as_str()))
+                    .collect(),
+            ));
+        }
+        reader.finish().map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_free(ptr: *mut PlFrame) {
     if !ptr.is_null() {
@@ -1932,6 +2028,113 @@ pub unsafe extern "C" fn pl_dataframe_shape(
     *rows = frame.df.height() as u64;
     *cols = frame.df.width() as u64;
     0
+}
+
+/// Reports the approximate in-memory size of the frame in bytes.
+///
+/// The value is Polars' estimate and excludes allocator overhead beyond the
+/// column buffers. It is written to `bytes` and the function returns zero on
+/// success. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_estimated_size(
+    ptr: *mut PlFrame,
+    bytes: *mut u64,
+    err: *mut *mut c_char,
+) -> i32 {
+    if bytes.is_null() {
+        return 2;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<u64, String> {
+        let frame = frame_ref(ptr)?;
+        Ok(frame.df.estimated_size() as u64)
+    }));
+    match result {
+        Ok(Ok(value)) => {
+            *bytes = value;
+            0
+        },
+        Ok(Err(message)) => {
+            set_error(err, message);
+            1
+        },
+        Err(payload) => {
+            set_error(err, panic_message(payload));
+            1
+        },
+    }
+}
+
+/// Checks whether rows are already sorted by one or more columns.
+///
+/// `columns` points to `column_count` names. `descending` points to the same
+/// number of non-zero flags; `nulls_last` is applied to every key. The result
+/// is written to `out` as zero or one. Empty key lists, mismatched flag arrays,
+/// unknown columns, null output pointers, and closed frames are errors. This
+/// entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_is_sorted(
+    ptr: *mut PlFrame,
+    columns: *const *const c_char,
+    column_count: u64,
+    descending: *const i32,
+    descending_count: u64,
+    nulls_last: i32,
+    out: *mut i32,
+    err: *mut *mut c_char,
+) -> i32 {
+    if out.is_null() {
+        return 2;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<bool, String> {
+        let frame = frame_ref(ptr)?;
+        let names = read_name_list(columns, column_count, "is_sorted columns")?;
+        if names.is_empty() {
+            return Err("is_sorted requires at least one column".to_string());
+        }
+        for name in &names {
+            if frame.df.get_column_index(name.as_str()).is_none() {
+                return Err(format!(
+                    "is_sorted column '{name}' is not a column in the DataFrame"
+                ));
+            }
+        }
+        let descending_count: usize = descending_count
+            .try_into()
+            .map_err(|_| "is_sorted descending count is too large".to_string())?;
+        if descending_count != names.len() {
+            return Err(format!(
+                "is_sorted descending count {} does not match column count {}",
+                descending_count,
+                names.len()
+            ));
+        }
+        if descending.is_null() {
+            return Err("is_sorted descending flags are null".to_string());
+        }
+        let raw = std::slice::from_raw_parts(descending, descending_count);
+        let by: Vec<PlSmallStr> = names
+            .iter()
+            .map(|name| PlSmallStr::from_str(name.as_str()))
+            .collect();
+        let descending: Vec<bool> = raw.iter().map(|value| *value != 0).collect();
+        let nulls_last = vec![nulls_last != 0; by.len()];
+        DataFrameIsSorted::is_sorted(&frame.df, &by, &descending, &nulls_last)
+            .map_err(|error| error.to_string())
+    }));
+    match result {
+        Ok(Ok(value)) => {
+            *out = if value { 1 } else { 0 };
+            0
+        },
+        Ok(Err(message)) => {
+            set_error(err, message);
+            1
+        },
+        Err(payload) => {
+            set_error(err, panic_message(payload));
+            1
+        },
+    }
 }
 
 #[no_mangle]
@@ -2084,6 +2287,38 @@ pub unsafe extern "C" fn pl_dataframe_reverse(
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
         let frame = frame_ref(ptr)?;
         Ok(frame.df.reverse())
+    }));
+    finish_frame(result, err)
+}
+
+/// Transposes a frame so columns become rows and rows become columns.
+///
+/// `keep_names_as` is an optional non-empty column name that receives the
+/// original column names; a null pointer omits it. Polars finds a common
+/// supertype across all values, so mixed dtypes are cast to that type. Output
+/// columns are named `column_0`, `column_1`, and so on unless a name column is
+/// requested. Empty frames cannot be transposed. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_transpose(
+    ptr: *mut PlFrame,
+    keep_names_as: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let keep = if keep_names_as.is_null() {
+            None
+        } else {
+            let name = read_utf8(keep_names_as, "transpose keep_names_as")?;
+            if name.is_empty() {
+                return Err("transpose keep_names_as must not be empty".to_string());
+            }
+            Some(name)
+        };
+        let mut output = frame.df.clone();
+        output
+            .transpose(keep.as_deref(), None)
+            .map_err(|error| error.to_string())
     }));
     finish_frame(result, err)
 }

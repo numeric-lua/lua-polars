@@ -26,7 +26,7 @@ end
 
 ## Status
 
-`0.23.0` is an eager-first MVP:
+`0.24.0` is an eager-first MVP:
 
 - CSV, Parquet, and JSON readers and writers
 - CSV reader options: one-byte `delimiter`, `header = false` for headerless
@@ -53,27 +53,32 @@ end
   non-negative `float_precision` for float columns, `include_bom = true` for a
   UTF-8 byte-order mark, and `decimal_comma = true` for comma-decimal floats
 - Parquet reader options: a `columns` name/list projection, a
-  `skip_rows`/`n_rows` window that keeps the file schema for empty results, and
-  `low_memory = true` for Polars' lower-memory reader path
+  `skip_rows`/`n_rows` window that keeps the file schema for empty results,
+  `low_memory = true` for Polars' lower-memory reader path, and
+  `rechunk = true` to consolidate the result into single-chunk columns
 - Parquet writer options: a `compression` codec (`zstd`, `snappy`, `gzip`,
   `brotli`, `lz4`, `uncompressed`), `statistics = false` to skip column
   statistics, and positive `row_group_size`/`data_page_size` chunk controls
 - JSON reader options: `format = "array"` (default; alias `"json"`) or
-  `"lines"`/`"ndjson"`, a `columns` name/list projection, and a non-negative
-  `infer_schema_length` for JSON Lines (`0` scans the whole stream); JSON
+  `"lines"`/`"ndjson"`, a `columns` name/list projection, a non-negative
+  `infer_schema_length` for JSON Lines (`0` scans the whole stream), and
+  `ignore_errors = true` to turn unparsable JSON Lines values into nulls; JSON
   writers support the same array/lines formats
 - schema, shape, head/tail/slice, ordered columns, and `with_row_index`
 - SQL queries against the DataFrame registered as `df`
-- helpers for select, filter, sort, `top_k`/`bottom_k`, group-by,
-  `value_counts`, drop, rename, and with-columns that preserve column order
+- helpers for select, filter, sort, sortedness checks, `top_k`/`bottom_k`,
+  group-by, `value_counts`, drop, rename, and with-columns that preserve
+  column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and `to_json([options])` for arrays or JSON Lines,
   plus `read_json`/`write_json`
-- `reverse()` for row order, `shift(periods [, columns])` for lag/lead and
-  `clip(min, max [, columns])` for inclusive numeric bounds, `cast(mapping)` for
-  strict column dtype changes, `unique([columns, options])` with subsets and
+- `reverse()` for row order, `transpose([options])` for swapping rows and
+  columns, `shift(periods [, columns])` for lag/lead and `clip(min, max
+  [, columns])` for inclusive numeric bounds, `cast(mapping)` for strict column
+  dtype changes, `unique([columns, options])` with subsets and
   first/last/none/any keep strategies, and `explode(columns [, options])` for
   list columns
+- `estimated_size()` reports the approximate in-memory byte footprint
 - `take(indices)` selects rows by 1-based or negative position, while
   `is_duplicated([name])`/`is_unique([name])` append a Boolean marker column
   for repeated or single-occurrence full rows, `null_mask([name])` appends a
@@ -133,12 +138,13 @@ empty-file reads, NaN fill/drop, shift/clip transforms, indexed row take,
 strided row windows, top/bottom k, null masks, forward/backward null fills,
 duplicate and unique markers, writer delimiter/header/null/line-terminator
 options, UTF-8 BOM and decimal-comma output,
-Parquet column projections, row windows, low-memory reads, compression codecs,
-statistics and chunk-size writer options, JSON array/JSON Lines round-trips and
-JSON Lines string output, schema, head, tail, slice, row indexing, projection,
-row reversal, strict casting, subset distinct rows, list-column explode,
-filtering, sorting, grouping, all eager join types, column operations, SQL,
-JSON conversion, and error paths. The smoke test installs the module and bridge
+Parquet column projections, row windows, low-memory and rechunk reads,
+compression codecs, statistics and chunk-size writer options, JSON array/JSON
+Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
+schema, estimated size, head, tail, slice, row indexing, projection, row
+reversal, transpose, sortedness checks, strict casting, subset distinct rows,
+list-column explode, filtering, sorting, grouping, all eager join types,
+column operations, SQL, JSON conversion, and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
 `POLARS_LUA_LIB`.
 The rockspec check validates the release version references, installs the same
@@ -159,17 +165,17 @@ Lua loader also searches the directories on `package.cpath`, so no
 `POLARS_LUA_LIB` is needed.
 
 ```sh
-luarocks make lua-polars-0.23.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.24.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 For a clean checkout the first command compiles Polars; set
 `CARGO_BUILD_JOBS=1` on a memory-constrained machine (the rockspec and
-`scripts/build.sh` default to one job). The source URL points at the `v0.23.0`
+`scripts/build.sh` default to one job). The source URL points at the `v0.24.0`
 tag, which is created as part of the release: use `luarocks make` from a
 checkout before the tag exists, and
-`luarocks build lua-polars-0.23.0-1.rockspec` afterwards. Both use the same
+`luarocks build lua-polars-0.24.0-1.rockspec` afterwards. Both use the same
 build and install commands.
 
 ## Install into a prefix
@@ -224,17 +230,22 @@ polars.read_parquet(path, {
   skip_rows = 10,
   n_rows = 100,
   low_memory = true,
+  rechunk = true,
 })
 polars.read_json(path)
 polars.read_json(path, {
   format = "lines",
   columns = { "time", "event" },
   infer_schema_length = 0,
+  ignore_errors = true,
 })
 
 df:shape()                -- rows, cols
 df:schema()               -- { column = "i64", ... }
 df:columns()              -- ordered column names
+df:estimated_size()       -- approximate bytes
+df:is_sorted("score", false)
+df:transpose({ keep_names_as = "field" })
 df:head(n)
 df:tail(n)
 df:slice(offset, length)

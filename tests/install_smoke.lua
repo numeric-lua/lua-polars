@@ -18,8 +18,8 @@ check(source:sub(1, 1) == "@", "module source is not a file path")
 local module_path = source:sub(2)
 check(module_path:sub(1, #prefix) == prefix,
   "loaded polars from outside the installed prefix: " .. module_path)
-check(polars.version() == "0.23.0", "unexpected bridge version")
-check(polars._VERSION == "0.23.0", "unexpected Lua module version")
+check(polars.version() == "0.24.0", "unexpected bridge version")
+check(polars._VERSION == "0.24.0", "unexpected Lua module version")
 
 local df = polars.read_csv(fixture)
 local rows, cols = df:shape()
@@ -91,6 +91,20 @@ top:close()
 local bottom = row_tools:bottom_k(2, "score")
 check(bottom:to_table()[1].name == "duda", "unexpected bottom_k row")
 bottom:close()
+check(row_tools:estimated_size() > 0, "estimated_size was not positive")
+check(row_tools:is_sorted("name"), "sorted names were not detected")
+local sorted_rows = row_tools:sort("score", false)
+check(sorted_rows:is_sorted("score"), "sorted scores were not detected")
+sorted_rows:close()
+local numeric = row_tools:sql('SELECT "score" FROM df')
+local transposed = numeric:transpose()
+local transpose_rows, transpose_cols = transposed:shape()
+check(transpose_rows == 1 and transpose_cols == 5,
+  "unexpected transpose shape")
+check(transposed:to_table()[1].column_0 == 10,
+  "unexpected transpose value")
+transposed:close()
+numeric:close()
 local masked = row_tools:null_mask()
 check(masked:columns()[5] == "has_nulls", "null mask was not appended")
 check(masked:to_table()[1].has_nulls == false, "unexpected null mask value")
@@ -425,6 +439,21 @@ check(json_array_string:sub(1, 1) == "[",
   "default to_json output does not start with an array")
 os.remove(json_out)
 
+local lenient_json = os.tmpname()
+local lenient_json_file = assert(io.open(lenient_json, "w"))
+lenient_json_file:write('{"x":1}\n{"x":2}\n{"x":"oops"}\n')
+lenient_json_file:close()
+local lenient = polars.read_json(lenient_json, {
+  format = "lines",
+  infer_schema_length = 2,
+  ignore_errors = true,
+})
+check(lenient:shape() == 3, "unexpected lenient JSON shape")
+check(lenient:to_table()[3].x == polars.null,
+  "unexpected lenient JSON null")
+lenient:close()
+os.remove(lenient_json)
+
 local parquet_out = os.tmpname()
 os.remove(parquet_out)
 writer:write_parquet(parquet_out, {
@@ -450,6 +479,14 @@ check(low_memory:shape() == 3, "unexpected low-memory Parquet shape")
 check(low_memory:to_table()[3].note == polars.null,
   "unexpected low-memory Parquet null")
 low_memory:close()
+local rechunked = polars.read_parquet(parquet_out, {
+  low_memory = true,
+  rechunk = true,
+})
+check(rechunked:shape() == 3, "unexpected rechunked Parquet shape")
+check(rechunked:to_table()[3].note == polars.null,
+  "unexpected rechunked Parquet null")
+rechunked:close()
 local bad_compression = pcall(function()
   writer:write_parquet(parquet_out, { compression = "lzo" })
 end)

@@ -136,6 +136,10 @@ PlFrame *pl_dataframe_read_parquet_options(
 PlFrame *pl_dataframe_read_parquet_low_memory(
     const char *path, const char *const *columns, uint64_t column_count,
     uint64_t skip_rows, int64_t n_rows, int32_t low_memory, char **err);
+PlFrame *pl_dataframe_read_parquet_full(
+    const char *path, const char *const *columns, uint64_t column_count,
+    uint64_t skip_rows, int64_t n_rows, int32_t low_memory, int32_t rechunk,
+    char **err);
 PlFrame *pl_dataframe_read_json(
     const char *path, int32_t json_lines,
     const char *const *columns, uint64_t column_count, char **err);
@@ -143,8 +147,18 @@ PlFrame *pl_dataframe_read_json_inferred(
     const char *path, int32_t json_lines,
     const char *const *columns, uint64_t column_count,
     int64_t infer_schema_length, char **err);
+PlFrame *pl_dataframe_read_json_full(
+    const char *path, int32_t json_lines,
+    const char *const *columns, uint64_t column_count,
+    int64_t infer_schema_length, int32_t ignore_errors, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
+int pl_dataframe_estimated_size(
+    PlFrame *frame, uint64_t *bytes, char **err);
+int pl_dataframe_is_sorted(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    const int32_t *descending, uint64_t descending_count,
+    int32_t nulls_last, int32_t *out, char **err);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
 char *pl_dataframe_columns_json(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
@@ -154,6 +168,8 @@ PlFrame *pl_dataframe_slice(
 PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_transpose(
+    PlFrame *frame, const char *keep_names_as, char **err);
 PlFrame *pl_dataframe_shift(
     PlFrame *frame, int64_t periods, const char *const *columns,
     uint64_t column_count, char **err);
@@ -358,6 +374,18 @@ function DataFrame:shape()
   return tonumber(rows[0]), tonumber(cols[0])
 end
 
+-- Approximate in-memory size in bytes reported by Polars.
+function DataFrame:estimated_size()
+  local bytes = ffi.new("uint64_t[1]")
+  local err = ffi.new("char *[1]")
+  local status = lib.pl_dataframe_estimated_size(self:_require_open(), bytes,
+    err)
+  if status ~= 0 then
+    error(take_error(err), 2)
+  end
+  return tonumber(bytes[0])
+end
+
 function DataFrame:schema()
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_schema_json(self:_require_open(), err)
@@ -434,6 +462,31 @@ end
 function DataFrame:reverse()
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_reverse(self:_require_open(), err)
+  return new_frame(pointer, err)
+end
+
+-- Transposes columns into rows. Polars finds a common supertype for the output;
+-- `keep_names_as` optionally receives the original column names.
+function DataFrame:transpose(options)
+  local keep_names_as
+  if options ~= nil then
+    if type(options) ~= "table" then
+      error("transpose options must be a table", 2)
+    end
+    for key in pairs(options) do
+      if key ~= "keep_names_as" then
+        error("transpose options: unknown field '" .. tostring(key) .. "'", 2)
+      end
+    end
+    keep_names_as = options.keep_names_as
+    if keep_names_as ~= nil and
+        (type(keep_names_as) ~= "string" or keep_names_as == "") then
+      error("transpose keep_names_as must be a non-empty string", 2)
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_transpose(self:_require_open(),
+    keep_names_as, err)
   return new_frame(pointer, err)
 end
 
@@ -1539,6 +1592,55 @@ function DataFrame:sort(columns, descending)
   return self:sql("SELECT * FROM df ORDER BY " .. table.concat(quoted, ", "))
 end
 
+-- Reports whether the frame is already ordered by the requested keys. The
+-- optional descending flag may be a boolean or a per-column boolean list.
+function DataFrame:is_sorted(columns, descending, nulls_last)
+  local keys = subset_columns(self, columns, "is_sorted")
+  if keys == nil then
+    error("is_sorted columns must be a column name or a list of names", 2)
+  end
+  local directions = ffi.new("int32_t[?]", #keys)
+  if descending == nil then
+    descending = false
+  end
+  if type(descending) == "boolean" then
+    for index = 1, #keys do
+      directions[index - 1] = descending and 1 or 0
+    end
+  elseif type(descending) == "table" then
+    if #descending ~= #keys then
+      error("is_sorted descending list must match the column count", 2)
+    end
+    for index = 1, #keys do
+      local value = descending[index]
+      if type(value) ~= "boolean" then
+        error("is_sorted descending entries must be booleans", 2)
+      end
+      directions[index - 1] = value and 1 or 0
+    end
+  else
+    error("is_sorted descending must be a boolean or a list of booleans", 2)
+  end
+  if nulls_last == nil then
+    nulls_last = false
+  end
+  if type(nulls_last) ~= "boolean" then
+    error("is_sorted nulls_last must be a boolean", 2)
+  end
+  local names = ffi.new("const char *[?]", #keys)
+  for index, name in ipairs(keys) do
+    names[index - 1] = name
+  end
+  local out = ffi.new("int32_t[1]")
+  local err = ffi.new("char *[1]")
+  local status = lib.pl_dataframe_is_sorted(self:_require_open(), names,
+    #keys, directions, #keys, nulls_last and 1 or 0, out, err)
+  if status ~= 0 then
+    error(take_error(err), 2)
+  end
+  return out[0] ~= 0
+end
+
 local function rank_rows(self, k, columns, direction, label)
   if type(k) ~= "number" or k < 0 or k % 1 ~= 0 or k > MAX_SAFE_INTEGER then
     error(label .. " k must be a non-negative integer", 2)
@@ -1673,7 +1775,7 @@ function DataFrame:join(other, options)
 end
 
 local polars = {
-  _VERSION = "0.23.0",
+  _VERSION = "0.24.0",
   null = json.null,
   DataFrame = DataFrame,
 }
@@ -2226,11 +2328,12 @@ local PARQUET_READ_OPTION_KEYS = {
   skip_rows = true,
   n_rows = true,
   low_memory = true,
+  rechunk = true,
 }
 
 local function parquet_read_options(options)
   if options == nil then
-    return nil, 0, -1, false, nil
+    return nil, 0, -1, false, nil, nil
   end
   if type(options) ~= "table" then
     error("read_parquet options must be a table", 3)
@@ -2243,18 +2346,23 @@ local function parquet_read_options(options)
   local columns = column_projection(options.columns, "read_parquet")
   local skip_rows, n_rows, requested = row_window(options, "read_parquet")
   local low_memory = options.low_memory
+  local rechunk = options.rechunk
   if low_memory ~= nil and type(low_memory) ~= "boolean" then
     error("read_parquet low_memory must be a boolean", 3)
   end
+  if rechunk ~= nil and type(rechunk) ~= "boolean" then
+    error("read_parquet rechunk must be a boolean", 3)
+  end
   return columns, skip_rows, n_rows,
-    requested or columns ~= nil or low_memory ~= nil, low_memory
+    requested or columns ~= nil or low_memory ~= nil or rechunk ~= nil,
+    low_memory, rechunk
 end
 
 function polars.read_parquet(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_parquet path must be a non-empty string", 2)
   end
-  local columns, skip_rows, n_rows, requested, low_memory =
+  local columns, skip_rows, n_rows, requested, low_memory, rechunk =
     parquet_read_options(options)
   local err = ffi.new("char *[1]")
   local pointer
@@ -2268,10 +2376,10 @@ function polars.read_parquet(path, options)
         names[index - 1] = name
       end
     end
-    if low_memory ~= nil then
-      pointer = lib.pl_dataframe_read_parquet_low_memory(path, names,
+    if low_memory ~= nil or rechunk ~= nil then
+      pointer = lib.pl_dataframe_read_parquet_full(path, names,
         names and #columns or 0, skip_rows, n_rows,
-        low_memory and 1 or 0, err)
+        low_memory and 1 or 0, rechunk and 1 or 0, err)
     else
       pointer = lib.pl_dataframe_read_parquet_options(path, names,
         names and #columns or 0, skip_rows, n_rows, err)
@@ -2284,11 +2392,12 @@ local JSON_READ_OPTION_KEYS = {
   format = true,
   columns = true,
   infer_schema_length = true,
+  ignore_errors = true,
 }
 
 local function read_json_options(options)
   if options == nil then
-    return "array", nil, nil
+    return "array", nil, nil, false
   end
   if type(options) ~= "table" then
     error("read_json options must be a table", 3)
@@ -2305,16 +2414,22 @@ local function read_json_options(options)
         infer_schema_length > MAX_SAFE_INTEGER) then
     error("read_json infer_schema_length must be a non-negative integer", 3)
   end
+  local ignore_errors = options.ignore_errors
+  if ignore_errors ~= nil and type(ignore_errors) ~= "boolean" then
+    error("read_json ignore_errors must be a boolean", 3)
+  end
   return json_format(options.format, "read_json"),
     column_projection(options.columns, "read_json"),
-    infer_schema_length
+    infer_schema_length,
+    ignore_errors == true
 end
 
 function polars.read_json(path, options)
   if type(path) ~= "string" or path == "" then
     error("read_json path must be a non-empty string", 2)
   end
-  local format, columns, infer_schema_length = read_json_options(options)
+  local format, columns, infer_schema_length, ignore_errors =
+    read_json_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -2324,7 +2439,11 @@ function polars.read_json(path, options)
     end
   end
   local pointer
-  if infer_schema_length ~= nil then
+  if ignore_errors then
+    pointer = lib.pl_dataframe_read_json_full(path,
+      format == "lines" and 1 or 0, names, names and #columns or 0,
+      infer_schema_length or -1, 1, err)
+  elseif infer_schema_length ~= nil then
     pointer = lib.pl_dataframe_read_json_inferred(path,
       format == "lines" and 1 or 0, names, names and #columns or 0,
       infer_schema_length, err)

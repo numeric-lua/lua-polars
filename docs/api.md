@@ -1,4 +1,4 @@
-# lua-polars API — 0.23.0
+# lua-polars API — 0.24.0
 
 ## Modules
 
@@ -15,7 +15,7 @@ The native bridge is loaded from `POLARS_LUA_LIB`, then
 
 ### `polars.version() -> string`
 
-Returns the bridge version (`"0.23.0"`).
+Returns the bridge version (`"0.24.0"`).
 
 ### `polars.read_csv(path [, options]) -> DataFrame`
 
@@ -200,6 +200,9 @@ Reads a Parquet file. With no options it reads every row and column.
 - `low_memory`: a boolean, default `false`. `true` selects Polars' lower-memory
   Parquet reader path, trading read speed for a smaller peak footprint. The
   returned schema and values are unchanged.
+- `rechunk`: a boolean, default `false`. `true` consolidates the result into a
+  single chunk per column. It composes with `low_memory`, projection, and the
+  row window without changing the schema or values.
 
 ```lua
 polars.read_parquet("data.parquet")
@@ -208,6 +211,7 @@ polars.read_parquet("data.parquet", {
   skip_rows = 10,
   n_rows = 100,
   low_memory = true,
+  rechunk = true,
 })
 ```
 
@@ -234,6 +238,11 @@ single JSON array.
   stream, and a positive value limits inference to that many records. JSON
   arrays are read as a whole by Polars, so the option is accepted but has no
   effect there. It must be at most `2^53 - 1`.
+- `ignore_errors`: a boolean, default `false`. For JSON Lines, `true` turns
+  values that cannot be parsed under the inferred or narrowed schema into nulls
+  and keeps the remaining records. It composes with `infer_schema_length` and
+  projection. Polars does not support it for JSON arrays, so that combination
+  is an error.
 
 ```lua
 local rows = polars.read_json("rows.json")
@@ -241,13 +250,14 @@ local events = polars.read_json("events.jsonl", {
   format = "lines",
   columns = { "time", "event" },
   infer_schema_length = 0,
+  ignore_errors = true,
 })
 ```
 
 Unknown option keys and invalid types are errors, as are a missing or
 unreadable path, malformed JSON, unknown projection names, invalid
-`infer_schema_length`, and files whose top level is not a supported array or
-object stream.
+`infer_schema_length`, non-boolean `ignore_errors`, `ignore_errors` on an
+array, and files whose top level is not a supported array or object stream.
 
 ### `polars.null`
 
@@ -259,6 +269,16 @@ All methods require an open handle. Calling a method after `:close()` raises
 an error.
 
 ### `df:shape() -> rows, cols`
+
+### `df:estimated_size() -> bytes`
+
+Returns Polars' approximate in-memory size for the frame in bytes. The value
+excludes allocator overhead beyond the column buffers and is `0` for an empty
+frame. Calling it on a closed frame is an error.
+
+```lua
+local bytes = df:estimated_size()
+```
 
 ### `df:schema() -> table`
 
@@ -341,6 +361,22 @@ empty. Calling it on a closed frame is an error.
 ```lua
 local newest_first = df:reverse()
 ```
+
+### `df:transpose([options]) -> DataFrame`
+
+Transposes the frame so columns become rows and rows become columns. Polars
+finds a common supertype across all values, so mixed dtypes are cast to that
+type. Output columns are named `column_0`, `column_1`, and so on unless
+`options.keep_names_as` supplies a non-empty column name for the original
+column names. Empty frames cannot be transposed; the input frame is unchanged.
+
+```lua
+local swapped = df:transpose()
+local named = df:transpose({ keep_names_as = "field" })
+```
+
+Unknown option keys, a non-table options argument, empty `keep_names_as`,
+empty frames, and closed frames are errors.
 
 ### `df:shift(periods [, columns]) -> DataFrame`
 
@@ -631,6 +667,23 @@ The condition is SQL, not a Lua expression; only pass trusted strings.
 
 `columns` is a name or list. `descending` is a boolean or a per-column list of
 booleans.
+
+### `df:is_sorted(columns [, descending [, nulls_last]]) -> boolean`
+
+Reports whether the current row order is sorted by one or more columns.
+`descending` is a boolean or a per-column list of booleans and defaults to
+`false`; `nulls_last` is a single boolean applied to every key and defaults to
+`false`. The input frame is unchanged.
+
+```lua
+local ordered = df:is_sorted("score")
+local desc = df:is_sorted("score", true)
+local keyed = df:is_sorted({ "team", "score" }, { false, false }, true)
+```
+
+Missing, malformed, duplicate, empty, or unknown key lists, a descending list
+whose length differs from the key count, non-boolean descending or
+`nulls_last` values, and closed frames are errors.
 
 ### `df:top_k(k, columns) -> DataFrame`
 
@@ -1029,6 +1082,10 @@ PlFrame *pl_dataframe_read_parquet_options(
 PlFrame *pl_dataframe_read_parquet_low_memory(
     const char *path, const char *const *columns, uint64_t column_count,
     uint64_t skip_rows, int64_t n_rows, int32_t low_memory, char **err);
+PlFrame *pl_dataframe_read_parquet_full(
+    const char *path, const char *const *columns, uint64_t column_count,
+    uint64_t skip_rows, int64_t n_rows, int32_t low_memory, int32_t rechunk,
+    char **err);
 PlFrame *pl_dataframe_read_json(
     const char *path, int32_t json_lines,
     const char *const *columns, uint64_t column_count, char **err);
@@ -1036,8 +1093,18 @@ PlFrame *pl_dataframe_read_json_inferred(
     const char *path, int32_t json_lines,
     const char *const *columns, uint64_t column_count,
     int64_t infer_schema_length, char **err);
+PlFrame *pl_dataframe_read_json_full(
+    const char *path, int32_t json_lines,
+    const char *const *columns, uint64_t column_count,
+    int64_t infer_schema_length, int32_t ignore_errors, char **err);
 void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
+int pl_dataframe_estimated_size(
+    PlFrame *frame, uint64_t *bytes, char **err);
+int pl_dataframe_is_sorted(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    const int32_t *descending, uint64_t descending_count,
+    int32_t nulls_last, int32_t *out, char **err);
 char *pl_dataframe_schema_json(PlFrame *frame, char **err);
 char *pl_dataframe_columns_json(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_head(PlFrame *frame, int64_t n, char **err);
@@ -1047,6 +1114,8 @@ PlFrame *pl_dataframe_slice(
 PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_transpose(
+    PlFrame *frame, const char *keep_names_as, char **err);
 PlFrame *pl_dataframe_shift(
     PlFrame *frame, int64_t periods, const char *const *columns,
     uint64_t column_count, char **err);
@@ -1152,8 +1221,16 @@ so malformed content still fails. Earlier reader entry points keep
 argument is a `usize` after conversion, so an out-of-range value is an error.
 Explicit `dtypes` overrides still take precedence.
 
+`pl_dataframe_estimated_size` writes Polars' approximate in-memory byte count to
+`uint64_t *bytes` and returns zero on success. `pl_dataframe_is_sorted` checks
+one or more keys with a parallel descending-flag array and a single
+`nulls_last` flag, writing the Boolean result to `int32_t *out`.
+
 `pl_dataframe_reverse` returns a newly owned frame with the same columns and
-reversed row order. `pl_dataframe_shift` borrows an optional column list; a
+reversed row order. `pl_dataframe_transpose` swaps rows and columns, optionally
+naming the output column that receives the original column names; Polars casts
+all values to a common supertype. `pl_dataframe_shift` borrows an optional
+column list; a
 null/zero count shifts every column, a positive `periods` inserts leading nulls,
 and a negative value inserts trailing nulls. `pl_dataframe_clip` clamps every
 numeric column (or only the borrowed explicit list) to the inclusive
@@ -1315,6 +1392,11 @@ projection and row-window arguments as `pl_dataframe_read_parquet_options` plus
 `int32_t low_memory`. Non-zero selects Polars' lower-memory reader path; zero
 keeps the default. The schema and values are unchanged.
 
+`pl_dataframe_read_parquet_full` is additive and carries both `int32_t
+low_memory` and `int32_t rechunk`. A non-zero `rechunk` consolidates the result
+into single-chunk columns after reading; both flags compose with projection and
+the row window.
+
 `pl_dataframe_write_parquet_options` is additive; `pl_dataframe_write_parquet`
 keeps its signature and Zstd/statistics/default-chunking behavior. A null or
 empty `compression` keeps Zstd; the accepted names are `zstd`, `snappy`,
@@ -1339,6 +1421,11 @@ failure.
 positive value limits inference to that many records. JSON arrays are read as
 a whole, so the argument is validated but has no effect there.
 
+`pl_dataframe_read_json_full` is additive and carries the inference window plus
+`int32_t ignore_errors`. Non-zero keeps JSON Lines records whose values cannot
+be parsed by substituting nulls; JSON arrays reject the flag. The remaining
+arguments match `pl_dataframe_read_json_inferred`.
+
 `pl_dataframe_to_json_format` is additive and serializes a frame as a JSON
 array when `json_lines` is zero or as one object per line otherwise. The
 returned string has the same Polars conventions as `pl_dataframe_to_json` and
@@ -1348,7 +1435,7 @@ must be freed with `pl_string_free`.
 
 ### LuaRocks source rock
 
-`lua-polars-0.23.0-1.rockspec` uses a `command` build. Its build command runs
+`lua-polars-0.24.0-1.rockspec` uses a `command` build. Its build command runs
 `scripts/ensure-bridge.sh`, which reuses a release bridge newer than the Rust
 inputs and otherwise builds incrementally. LuaRocks then calls
 `scripts/install-rock.sh` with `$(LUADIR)` and `$(LIBDIR)`, so Lua modules are
@@ -1357,13 +1444,13 @@ deployed under `share/lua/<version>/` and the native bridge under
 `libpolars_lua.<ext>`, so the rock works without `POLARS_LUA_LIB`:
 
 ```sh
-luarocks make lua-polars-0.23.0-1.rockspec --tree=/tmp/lua-polars-rock
+luarocks make lua-polars-0.24.0-1.rockspec --tree=/tmp/lua-polars-rock
 eval "$(luarocks path --tree=/tmp/lua-polars-rock)"
 luajit -e 'print(require("polars").version())'
 ```
 
 If `target/release/libpolars_lua.so` is absent or older than the Rust sources,
-the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.23.0`
+the bridge is built with `CARGO_BUILD_JOBS` defaulting to one. The `v0.24.0`
 source tag referenced by the rockspec is created with the release; before that,
 `luarocks make` from a checkout exercises the same build and install commands.
 `scripts/rockspec.sh` runs `scripts/check-version.sh` first, so a mismatch
@@ -1411,6 +1498,8 @@ LUA_PATH='/tmp/lua-polars/share/lua/5.1/?.lua;;' \
 - [x] DataFrame row shifting and numeric clipping.
 - [x] DataFrame row striding and null masks.
 - [x] Forward and backward null filling.
+- [x] DataFrame transpose, size estimates, and sortedness checks.
+- [x] Lenient JSON Lines reads and Parquet rechunking.
 - [x] Indexed row take and top/bottom k helpers.
 - [x] Parquet low-memory reads and JSON Lines string output.
 - [x] Duplicate and unique row markers.

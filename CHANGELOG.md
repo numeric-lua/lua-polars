@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.24.0
+
+- five DataFrame/IO additions:
+  - `df:transpose([options])` swaps rows and columns, optionally storing the
+    original column names in a `keep_names_as` column; Polars casts values to a
+    common supertype;
+  - `df:estimated_size()` reports the approximate in-memory byte footprint;
+  - `df:is_sorted(columns [, descending [, nulls_last]])` checks the current
+    row order against one or more keys, with per-column direction flags;
+  - `polars.read_json(..., { ignore_errors = true })` keeps unparsable JSON
+    Lines values as nulls and composes with `infer_schema_length` and
+    projection;
+  - `polars.read_parquet(..., { rechunk = true })` consolidates the result into
+    single-chunk columns and composes with `low_memory`, projection, and the
+    row window;
+- the additive C ABI entry points are `pl_dataframe_transpose`,
+  `pl_dataframe_estimated_size`, `pl_dataframe_is_sorted`,
+  `pl_dataframe_read_json_full`, and `pl_dataframe_read_parquet_full`; every
+  earlier signature and default is unchanged;
+- validation covers unknown or empty transpose options, empty transpose inputs,
+  malformed or unknown sortedness keys, mismatched or non-boolean descending
+  lists, non-boolean `nulls_last`, non-boolean `ignore_errors`, `ignore_errors`
+  on JSON arrays, non-boolean `rechunk`, and closed frames;
+- tests cover numeric transpose with and without name retention, size and
+  sortedness checks on ascending/descending/multi-key frames, lenient JSON
+  Lines parsing with narrowing inference and projection, Parquet low-memory and
+  rechunk combinations, and every new error path, including the
+  installed-prefix smoke test;
+- `./scripts/test.sh` passed 185 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validate the installed-prefix and LuaRocks layouts
+  for 0.24.0-1;
+- the 0.24.0 tag is created for this release.
+
 ## 0.23.0
 
 - five DataFrame/IO additions:
