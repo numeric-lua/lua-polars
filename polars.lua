@@ -194,6 +194,9 @@ PlFrame *pl_dataframe_clip(
 PlFrame *pl_dataframe_diff(
     PlFrame *frame, int64_t periods, const char *const *columns,
     uint64_t column_count, char **err);
+PlFrame *pl_dataframe_cumulative(
+    PlFrame *frame, const char *operation, const char *const *columns,
+    uint64_t column_count, char **err);
 PlFrame *pl_dataframe_gather_every(
     PlFrame *frame, uint64_t n, uint64_t offset, char **err);
 PlFrame *pl_dataframe_null_mask(
@@ -265,6 +268,7 @@ int pl_dataframe_write_json_pretty(
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 char *pl_dataframe_to_json_format(
     PlFrame *frame, int32_t json_lines, char **err);
+char *pl_dataframe_to_json_pretty(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ]]
 
@@ -1279,6 +1283,43 @@ function DataFrame:diff(periods, columns)
   return new_frame(pointer, err)
 end
 
+local function cumulative(frame, columns, operation, label)
+  local selected = subset_columns(frame, columns, label)
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_cumulative(frame:_require_open(), operation,
+    names, count, err)
+  return new_frame(pointer, err)
+end
+
+-- Running sum over every numeric column or a validated numeric subset.
+function DataFrame:cum_sum(columns)
+  return cumulative(self, columns, "sum", "cum_sum")
+end
+
+-- Running minimum over every numeric column or a validated numeric subset.
+function DataFrame:cum_min(columns)
+  return cumulative(self, columns, "min", "cum_min")
+end
+
+-- Running maximum over every numeric column or a validated numeric subset.
+function DataFrame:cum_max(columns)
+  return cumulative(self, columns, "max", "cum_max")
+end
+
+-- Running count of non-null values over every numeric column or a subset.
+function DataFrame:cum_count(columns)
+  return cumulative(self, columns, "count", "cum_count")
+end
+
 -- Positive n keeps rows offset, offset+n, offset+2n, and so on. offset
 -- defaults to 0 and is a zero-based row index; an offset past the end returns
 -- an empty frame with the same schema.
@@ -1557,9 +1598,24 @@ function DataFrame:to_json(options)
       end
     end
     local format = json_format(options.format, "to_json")
+    local pretty = options.pretty
+    if pretty == nil then
+      pretty = false
+    end
+    if type(pretty) ~= "boolean" then
+      error("to_json pretty must be a boolean", 2)
+    end
+    if pretty and format == "lines" then
+      error("to_json pretty supports only the array format", 2)
+    end
     local err = ffi.new("char *[1]")
-    local pointer = lib.pl_dataframe_to_json_format(self:_require_open(),
-      format == "lines" and 1 or 0, err)
+    local pointer
+    if pretty then
+      pointer = lib.pl_dataframe_to_json_pretty(self:_require_open(), err)
+    else
+      pointer = lib.pl_dataframe_to_json_format(self:_require_open(),
+        format == "lines" and 1 or 0, err)
+    end
     return string_result(pointer, err)
   end
   local err = ffi.new("char *[1]")

@@ -72,6 +72,10 @@ check(differences:to_table()[1].score == polars.null,
   "diff did not leave a leading null")
 check(differences:to_table()[2].score == -3, "unexpected diff value")
 differences:close()
+local cumulative = row_tools:cum_sum("score")
+check(cumulative:to_table()[5].score == 43,
+  "unexpected cumulative sum")
+cumulative:close()
 local compact = row_tools:rechunk()
 check(compact:shape() == row_tools:shape(), "rechunk changed the shape")
 compact:close()
@@ -459,6 +463,10 @@ check(json_lines_string:sub(1, 1) == "{",
 local json_array_string = writer:to_json()
 check(json_array_string:sub(1, 1) == "[",
   "default to_json output does not start with an array")
+local pretty_string = writer:to_json({ pretty = true })
+check(pretty_string:sub(1, 1) == "[", "pretty to_json is not an array")
+check(pretty_string:find("\n", 1, true) ~= nil,
+  "pretty to_json has no line breaks")
 local pretty_json = os.tmpname()
 os.remove(pretty_json)
 writer:write_json(pretty_json, { pretty = true })

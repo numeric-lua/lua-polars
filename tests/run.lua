@@ -4236,6 +4236,135 @@ test("write_json pretty writes an indented array", function()
     "closed pretty write_json error")
 end)
 
+test("cumulative sum, min, and max run in row order", function()
+  local df = polars.read_csv(fixture)
+  local sum = df:cum_sum("score")
+  eq(sum:shape(), df:shape())
+  eq(sum:schema().score, "i64")
+  local rows = sum:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[2].score, 17)
+  eq(rows[3].score, 29)
+  eq(rows[4].score, 34)
+  eq(rows[5].score, 43)
+  sum:close()
+
+  local minimum = df:cum_min("score")
+  rows = minimum:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[2].score, 7)
+  eq(rows[3].score, 7)
+  eq(rows[4].score, 5)
+  eq(rows[5].score, 5)
+  minimum:close()
+
+  local maximum = df:cum_max("score")
+  rows = maximum:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[2].score, 10)
+  eq(rows[3].score, 12)
+  eq(rows[4].score, 12)
+  eq(rows[5].score, 12)
+  maximum:close()
+
+  local all = df:cum_sum()
+  rows = all:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].active, true)
+  eq(rows[5].score, 43)
+  all:close()
+  eq(df:to_table()[1].score, 10, "cumulative op changed the input frame")
+  df:close()
+end)
+
+test("cum_count counts non-nulls and honors subsets", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,x\n1,1\n2,\n3,3\n4,4\n")
+  file:close()
+  local df = polars.read_csv(path)
+  local counted = df:cum_count("x")
+  eq(counted:schema().x, "u32")
+  local rows = counted:to_table()
+  eq(rows[1].x, 1)
+  eq(rows[2].x, 1)
+  eq(rows[3].x, 2)
+  eq(rows[4].x, 3)
+  counted:close()
+
+  local scoped = df:cum_count("id")
+  eq(scoped:to_table()[1].x, 1)
+  eq(scoped:to_table()[2].x, polars.null,
+    "cum_count touched an unselected column")
+  scoped:close()
+  eq(df:to_table()[2].x, polars.null, "cum_count changed the input frame")
+  df:close()
+end)
+
+test("cumulative operations reject invalid subsets", function()
+  local df = polars.read_csv(fixture)
+  local methods = { "cum_sum", "cum_min", "cum_max", "cum_count" }
+  local cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "score", [3] = "active" }, "contiguous list" },
+    { { "score", "score" }, "duplicate" },
+    { { "missing" }, "is not a column in the DataFrame" },
+    { { "name" }, "expected a numeric column" },
+  }
+  for _, method in ipairs(methods) do
+    for _, case in ipairs(cases) do
+      local ok, err = pcall(function() df[method](df, case[1]) end)
+      eq(ok, false, method .. " accepted an invalid subset")
+      truthy(tostring(err):find(case[2], 1, true),
+        "expected '" .. case[2] .. "' in: " .. tostring(err))
+    end
+  end
+  df:close()
+  for _, method in ipairs(methods) do
+    local ok, err = pcall(function() df[method](df) end)
+    eq(ok, false, method .. " accepted a closed frame")
+    truthy(tostring(err):find("closed", 1, true),
+      method .. " closed error")
+  end
+end)
+
+test("to_json pretty writes an indented string", function()
+  local df = polars.read_csv(fixture)
+  local array = df:to_json()
+  local pretty = df:to_json({ pretty = true })
+  eq(pretty:sub(1, 1), "[")
+  truthy(pretty:find("\n", 1, true), "pretty to_json has no newlines")
+  truthy(pretty:find('"name": "ana"', 1, true) or
+    pretty:find('"name":"ana"', 1, true), "pretty to_json row missing")
+  eq(df:to_json({ pretty = false }), array,
+    "pretty=false changed the compact output")
+
+  local path = new_temp_path(".json")
+  local file = assert(io.open(path, "w"))
+  file:write(pretty)
+  file:close()
+  local loaded = polars.read_json(path)
+  eq(loaded:shape(), df:shape())
+  eq(loaded:to_table()[1].name, "ana")
+  loaded:close()
+
+  local ok, err = pcall(function()
+    df:to_json({ pretty = true, format = "lines" })
+  end)
+  eq(ok, false, "pretty JSON Lines string accepted")
+  truthy(tostring(err):find("array format", 1, true),
+    "pretty lines error: " .. tostring(err))
+  ok, err = pcall(function() df:to_json({ pretty = "yes" }) end)
+  eq(ok, false, "non-boolean to_json pretty accepted")
+  truthy(tostring(err):find("pretty must be a boolean", 1, true),
+    "pretty type error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:to_json({ pretty = true }) end)
+  eq(ok, false, "closed pretty to_json accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed pretty to_json error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

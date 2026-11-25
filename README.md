@@ -72,12 +72,13 @@ end
   checks, `top_k`/`bottom_k`, group-by, `value_counts`, drop, rename, and
   with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
-- row-oriented `to_table()` and `to_json([options])` for arrays or JSON Lines,
-  plus `read_json`/`write_json`
+- row-oriented `to_table()` and `to_json([options])` for compact, pretty, or
+  JSON Lines strings, plus `read_json`/`write_json`
 - `reverse()` for row order, `transpose([options])` for swapping rows and
   columns, `shift(periods [, columns])` for lag/lead, `diff(periods
   [, columns])` for numeric differences and `clip(min, max [, columns])` for
-  inclusive numeric bounds, `cast(mapping)` for strict column dtype changes,
+  inclusive numeric bounds, `cum_sum`/`cum_min`/`cum_max`/`cum_count` for
+  forward cumulative columns, `cast(mapping)` for strict column dtype changes,
   `unique([columns, options])` with subsets and first/last/none/any keep
   strategies, and `explode(columns [, options])` for list columns
 - `estimated_size()` reports the approximate in-memory byte footprint and
@@ -145,10 +146,11 @@ Parquet column projections, row windows, low-memory and rechunk reads,
 compression codecs, statistics and chunk-size writer options, JSON array/JSON
 Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
 CSV low-memory reads, schema, estimated size, rechunking, head, tail, slice,
-row indexing, projection, row reversal, transpose, sortedness checks, strict
-casting, subset distinct rows, list-column explode, filtering, sorting with
-null placement, grouping, all eager join types, column operations, SQL, JSON
-conversion, and error paths. The smoke test installs the module and bridge
+row indexing, projection, row reversal, transpose, sortedness checks,
+cumulative transforms, strict casting, subset distinct rows, list-column
+explode, filtering, sorting with null placement, grouping, all eager join
+types, column operations, SQL, JSON conversion and pretty strings, and error
+paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
 `POLARS_LUA_LIB`.
 The rockspec check validates the release version references, installs the same
@@ -261,6 +263,10 @@ df:with_row_index("row_id", 100)
 df:reverse()
 df:shift(1, "score")
 df:diff(1, "score")
+df:cum_sum("score")
+df:cum_min("score")
+df:cum_max("score")
+df:cum_count("score")
 df:clip(0, 100, { "score", "bonus" })
 df:cast({ score = "f64" })
 df:unique("team", { keep = "last" })
@@ -309,6 +315,7 @@ df:write_json("pretty.json", { pretty = true })
 df:write_json("out.jsonl", { format = "lines" })
 df:to_table()
 df:to_json()
+df:to_json({ pretty = true })
 df:to_json({ format = "lines" })
 df:close()
 ```

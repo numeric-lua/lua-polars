@@ -27,7 +27,19 @@
   null-first/null-last and per-column sort placement, rechunk data
   preservation, low-memory CSV reads with projection and row limits, pretty
   JSON round-trips, and every new error path;
-- `./scripts/test.sh` passes 192 tests; `./scripts/smoke.sh` and
+- five additional DataFrame/IO additions:
+  - `df:cum_sum([columns])`, `df:cum_min([columns])`, `df:cum_max([columns])`,
+    and `df:cum_count([columns])` compute forward cumulative operations over
+    every numeric column or a validated numeric subset;
+  - `df:to_json({ pretty = true })` returns an indented JSON array string while
+    the no-option call keeps the compact array and JSON Lines remains
+    unformatted;
+- the additional C ABI entry points are `pl_dataframe_cumulative` and
+  `pl_dataframe_to_json_pretty`; every earlier signature and default is
+  unchanged;
+- validation covers malformed or non-numeric cumulative subsets, non-boolean
+  `pretty`, `pretty` with JSON Lines, and closed frames;
+- `./scripts/test.sh` passes 196 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

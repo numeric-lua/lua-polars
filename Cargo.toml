@@ -20,6 +20,7 @@ polars = { version = "0.55.2", default-features = false, features = [
     "dtype-date",
     "dtype-datetime",
     "diff",
+    "cum_agg",
 ] }
 serde_json = "1"
 

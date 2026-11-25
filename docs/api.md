@@ -428,6 +428,49 @@ Zero, negative, fractional, non-numeric, or above-`2^53 - 1` periods,
 malformed, duplicate, empty, unknown, or non-numeric column subsets, and closed
 frames are errors.
 
+### `df:cum_sum([columns]) -> DataFrame`
+
+Computes a forward running sum over every primitive numeric column or a
+validated numeric subset. Nulls remain null and a later value resumes the
+running total. Column order, the input frame, and non-selected columns are
+preserved.
+
+```lua
+local total = df:cum_sum("score")
+local all_numeric = df:cum_sum()
+```
+
+### `df:cum_min([columns]) -> DataFrame`
+
+Computes a forward running minimum with the same all-numeric default and
+validated numeric subset rules as `cum_sum`.
+
+```lua
+local floor = df:cum_min("score")
+```
+
+### `df:cum_max([columns]) -> DataFrame`
+
+Computes a forward running maximum with the same all-numeric default and
+validated numeric subset rules as `cum_sum`.
+
+```lua
+local ceiling = df:cum_max("score")
+```
+
+### `df:cum_count([columns]) -> DataFrame`
+
+Computes a forward running count of non-null values. The result is `u32`;
+nulls do not advance the count. It uses the same all-numeric default and
+validated numeric subset rules as the other cumulative operations.
+
+```lua
+local seen = df:cum_count("score")
+```
+
+Malformed, duplicate, empty, unknown, or non-numeric column subsets and closed
+frames are errors for all four cumulative operations.
+
 ### `df:clip(min, max [, columns]) -> DataFrame`
 
 Clamps numeric values to the inclusive `[min, max]` range. `min` and `max`
@@ -980,17 +1023,20 @@ empty paths, and write failures.
 Row-oriented JSON. With no options it returns a JSON array with one object per
 row. `options` may set `format` to `"array"` (default; alias `"json"`) or
 `"lines"` (aliases `"ndjson"`, `"jsonl"`, `"json-lines"`, and `"jsonlines"`),
-matched case-insensitively. JSON Lines returns one object per line and is not
-valid JSON as a whole; read it back with `read_json(..., { format = "lines" })`.
-Non-JSON types are formatted by Polars' Arrow JSON writer.
+matched case-insensitively. `pretty = true` returns an indented array; it
+composes with the array format only. JSON Lines returns one object per line and
+is not valid JSON as a whole; read it back with
+`read_json(..., { format = "lines" })`. Non-JSON types are formatted by Polars'
+Arrow JSON writer.
 
 ```lua
 local array = df:to_json()
+local pretty = df:to_json({ pretty = true })
 local lines = df:to_json({ format = "lines" })
 ```
 
-Unknown option keys, non-string or unsupported formats, and closed frames are
-errors.
+Unknown option keys, non-string or unsupported formats, non-boolean `pretty`,
+`pretty` with JSON Lines, and closed frames are errors.
 
 ### `df:to_table() -> table`
 
@@ -1189,6 +1235,9 @@ PlFrame *pl_dataframe_clip(
 PlFrame *pl_dataframe_diff(
     PlFrame *frame, int64_t periods, const char *const *columns,
     uint64_t column_count, char **err);
+PlFrame *pl_dataframe_cumulative(
+    PlFrame *frame, const char *operation, const char *const *columns,
+    uint64_t column_count, char **err);
 PlFrame *pl_dataframe_gather_every(
     PlFrame *frame, uint64_t n, uint64_t offset, char **err);
 PlFrame *pl_dataframe_null_mask(
@@ -1260,6 +1309,7 @@ int pl_dataframe_write_json_pretty(
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 char *pl_dataframe_to_json_format(
     PlFrame *frame, int32_t json_lines, char **err);
+char *pl_dataframe_to_json_pretty(PlFrame *frame, char **err);
 void pl_string_free(char *value);
 ```
 
@@ -1511,6 +1561,15 @@ arguments match `pl_dataframe_read_json_inferred`.
 array when `json_lines` is zero or as one object per line otherwise. The
 returned string has the same Polars conventions as `pl_dataframe_to_json` and
 must be freed with `pl_string_free`.
+
+`pl_dataframe_cumulative` applies `sum`, `min`, `max`, or `count` forward over
+every numeric column or a borrowed validated subset. `count` is a running count
+of non-null values and produces `u32`; the other operations preserve their
+input dtypes.
+
+`pl_dataframe_to_json_pretty` returns an indented JSON array string with the
+same values as `pl_dataframe_to_json`. JSON Lines is not supported by this
+entry point, and the returned string must be freed with `pl_string_free`.
 
 ## Install layouts
 

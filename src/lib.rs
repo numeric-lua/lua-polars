@@ -2621,6 +2621,58 @@ pub unsafe extern "C" fn pl_dataframe_diff(
     finish_frame(result, err)
 }
 
+/// Applies a forward cumulative numeric operation to selected columns.
+///
+/// `operation` is `sum`, `min`, `max`, or `count`, matched case-insensitively.
+/// A null/zero `columns` count targets every primitive numeric column; an
+/// explicit list must name numeric columns. `count` is a running count of
+/// non-null values. Column order and the input frame are preserved. This entry
+/// point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_cumulative(
+    ptr: *mut PlFrame,
+    operation: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let operation = read_utf8(operation, "cumulative operation")?;
+        let operation = operation.to_ascii_lowercase();
+        if !matches!(operation.as_str(), "sum" | "min" | "max" | "count") {
+            return Err(format!(
+                "unsupported cumulative operation '{operation}'; expected sum, min, max, or count"
+            ));
+        }
+        let requested = read_name_list(columns, column_count, "cumulative columns")?;
+        let names = numeric_target_columns(&frame.df, &requested, "cumulative")?;
+        if names.is_empty() {
+            return Ok(frame.df.clone());
+        }
+        let mut expressions = Vec::with_capacity(names.len());
+        for name in &names {
+            let column = col(name.as_str());
+            let expression = match operation.as_str() {
+                "sum" => column.cum_sum(false),
+                "min" => column.cum_min(false),
+                "max" => column.cum_max(false),
+                "count" => column.cum_count(false),
+                _ => unreachable!("operation was validated"),
+            };
+            expressions.push(expression.alias(name.as_str()));
+        }
+        frame
+            .df
+            .clone()
+            .lazy()
+            .with_columns(expressions)
+            .collect()
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 /// Casts one or more columns to new dtypes.
 ///
 /// `pairs` is a flat array of `column`, `dtype` string pairs and `pair_count`
@@ -3322,6 +3374,12 @@ fn to_json_string(df: &DataFrame, format: JsonFormat) -> Result<String, String> 
     String::from_utf8(buffer).map_err(|error| error.to_string())
 }
 
+fn to_json_pretty_string(df: &DataFrame) -> Result<String, String> {
+    let json = to_json_string(df, JsonFormat::Json)?;
+    let value: Value = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_to_json(
     ptr: *mut PlFrame,
@@ -3364,6 +3422,34 @@ pub unsafe extern "C" fn pl_dataframe_to_json_format(
             JsonFormat::Json
         };
         to_json_string(&frame.df, format)
+    }));
+    match result {
+        Ok(Ok(json)) => c_string(&json),
+        Ok(Err(message)) => {
+            set_error(err, message);
+            ptr::null_mut()
+        },
+        Err(payload) => {
+            set_error(err, panic_message(payload));
+            ptr::null_mut()
+        },
+    }
+}
+
+/// Serializes a frame as a pretty-printed JSON array string.
+///
+/// The output has the same values as [`pl_dataframe_to_json`] with indentation
+/// and line breaks. It is always an array; JSON Lines is not supported because
+/// pretty-printing would break the one-object-per-line contract. The returned
+/// string must be freed with [`pl_string_free`]. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_to_json_pretty(
+    ptr: *mut PlFrame,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<String, String> {
+        let frame = frame_ref(ptr)?;
+        to_json_pretty_string(&frame.df)
     }));
     match result {
         Ok(Ok(json)) => c_string(&json),
@@ -3852,11 +3938,7 @@ pub unsafe extern "C" fn pl_dataframe_write_json_pretty(
         }
         let frame = frame_ref(ptr)?;
         let path = read_path(path)?;
-        let json = to_json_string(&frame.df, JsonFormat::Json)?;
-        let value: Value =
-            serde_json::from_str(&json).map_err(|error| error.to_string())?;
-        let pretty =
-            serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+        let pretty = to_json_pretty_string(&frame.df)?;
         std::fs::write(path, pretty).map_err(|error| error.to_string())
     }));
     finish_write_with(result, err, "write_json")
