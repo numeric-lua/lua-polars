@@ -101,6 +101,10 @@ Polars' default.
   CSV reader path, trading read speed for a smaller peak footprint. It composes
   with projection, dtype overrides, inference, and the row window without
   changing the schema or values.
+- `rechunk`: a boolean, default `false`. `true` consolidates the returned frame
+  into single-chunk columns after reading. It composes with projection,
+  inference, `low_memory`, and the row window without changing the schema or
+  values.
 - `dtypes`: a table mapping column names to dtype names, applied by name at
   read time instead of relying on inference. Supported dtypes are `bool` /
   `boolean`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, and `str` / `string` /
@@ -873,6 +877,49 @@ local unsorted = df:value_counts("team", { sort = false, name = "n" })
 
 Unknown option keys, non-boolean `sort`, invalid or colliding names, empty,
 duplicate, unknown, or non-contiguous key lists, and closed frames are errors.
+
+### `df:sum(column) -> number|nil`
+
+Returns the scalar sum of one numeric column. Nulls are ignored; an empty
+column or a column with no non-null values returns `polars.null`. Summing an
+unsupported dtype is reported by Polars.
+
+```lua
+local total = df:sum("score")
+```
+
+### `df:mean(column) -> number|nil`
+
+Returns the scalar mean of one numeric column. Nulls are ignored; no values
+returns `polars.null`.
+
+```lua
+local average = df:mean("score")
+```
+
+### `df:min(column) -> value|nil`
+
+Returns the scalar minimum of one orderable column, including string columns.
+No values returns `polars.null`.
+
+```lua
+local lowest = df:min("score")
+local first_name = df:min("name")
+```
+
+### `df:max(column) -> value|nil`
+
+Returns the scalar maximum of one orderable column, including string columns.
+No values returns `polars.null`.
+
+```lua
+local highest = df:max("score")
+local last_name = df:max("name")
+```
+
+Non-string, empty, or unknown column names and closed frames are errors. A
+Polars type error is surfaced when an aggregate is not supported for the
+column's dtype.
 
 ### `df:drop(...) -> DataFrame`
 

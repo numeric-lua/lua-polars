@@ -55,7 +55,19 @@
 - validation covers malformed or non-numeric cumulative subsets, unknown or
   non-struct unnest columns, non-string separators, unknown CSV writer options,
   and closed frames;
-- `./scripts/test.sh` passes 201 tests; `./scripts/smoke.sh` and
+- five more DataFrame/IO additions:
+  - `df:sum(column)`, `df:mean(column)`, `df:min(column)`, and `df:max(column)`
+    return scalar aggregates for one column, with `polars.null` when no values
+    remain;
+  - `polars.read_csv(..., { rechunk = true })` rechunks the returned frame so
+    every column has one chunk; it composes with projection, inference,
+    low-memory reads, and row windows;
+- these additions reuse existing SQL and frame entry points, so there are no
+  new C ABI symbols or default changes;
+- validation covers non-string and empty aggregate columns, unknown aggregate
+  columns, unsupported aggregate input types, non-boolean `rechunk`, and closed
+  frames;
+- `./scripts/test.sh` passes 204 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

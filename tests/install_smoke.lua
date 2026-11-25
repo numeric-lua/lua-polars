@@ -87,6 +87,10 @@ compact:close()
 local shrunk = row_tools:shrink_to_fit()
 check(shrunk:shape() == row_tools:shape(), "shrink changed the shape")
 shrunk:close()
+check(row_tools:sum("score") == 43, "unexpected scalar sum")
+check(row_tools:mean("score") == 8.6, "unexpected scalar mean")
+check(row_tools:min("score") == 5, "unexpected scalar minimum")
+check(row_tools:max("score") == 12, "unexpected scalar maximum")
 local duplicated = row_tools:is_duplicated()
 check(duplicated:columns()[5] == "duplicated",
   "duplicate marker was not appended")
@@ -198,6 +202,15 @@ check(low_memory_csv:shape() == 2, "unexpected low-memory CSV shape")
 check(low_memory_csv:to_table()[1].score == 10,
   "unexpected low-memory CSV value")
 low_memory_csv:close()
+
+local rechunked_csv = polars.read_csv(fixture, {
+  rechunk = true,
+  columns = { "score", "name" },
+})
+check(rechunked_csv:max_chunks() == 1,
+  "read_csv rechunk did not consolidate chunks")
+check(rechunked_csv:shape() == 5, "unexpected rechunked CSV shape")
+rechunked_csv:close()
 
 local projected = polars.read_csv(fixture, { columns = { "score", "name" } })
 local projected_rows, projected_cols = projected:shape()

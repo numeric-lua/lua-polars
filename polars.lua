@@ -1544,6 +1544,40 @@ function DataFrame:value_counts(columns, options)
   return self:sql(query)
 end
 
+local function aggregate_value(frame, column, function_name, label)
+  if type(column) ~= "string" or column == "" then
+    error(label .. " column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(frame, column, label)
+  local query = "SELECT " .. function_name .. "(" ..
+    quote_identifier(selected[1]) .. ") AS value FROM df"
+  local result = frame:sql(query)
+  local rows = result:to_table()
+  local value = rows[1] and rows[1].value or json.null
+  result:close()
+  return value
+end
+
+-- Scalar sum of a numeric column; null when no values are present.
+function DataFrame:sum(column)
+  return aggregate_value(self, column, "SUM", "sum")
+end
+
+-- Scalar mean of a numeric column; null when no values are present.
+function DataFrame:mean(column)
+  return aggregate_value(self, column, "AVG", "mean")
+end
+
+-- Scalar minimum of an orderable column; null when no values are present.
+function DataFrame:min(column)
+  return aggregate_value(self, column, "MIN", "min")
+end
+
+-- Scalar maximum of an orderable column; null when no values are present.
+function DataFrame:max(column)
+  return aggregate_value(self, column, "MAX", "max")
+end
+
 function DataFrame:write_csv(path, options)
   if options == nil then
     return write_frame(self, path, "pl_dataframe_write_csv")
@@ -2034,6 +2068,7 @@ local CSV_OPTION_KEYS = {
   raise_if_empty = true,
   infer_schema_length = true,
   low_memory = true,
+  rechunk = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -2377,7 +2412,7 @@ end
 local function csv_options(options)
   if options == nil then
     return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil,
-      nil, nil, false, false, false, 0, false, true, nil, false
+      nil, nil, false, false, false, 0, false, true, nil, false, false
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -2415,12 +2450,13 @@ local function csv_options(options)
   local raise_if_empty = csv_raise_if_empty(options)
   local infer_schema_length = csv_infer_schema_length(options)
   local low_memory = csv_boolean_option(options, "low_memory")
+  local rechunk = csv_boolean_option(options, "rechunk")
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
     try_parse_dates, truncate_ragged_lines, ignore_errors,
     skip_rows_after_header, decimal_comma, raise_if_empty, infer_schema_length,
-    low_memory
+    low_memory, rechunk
 end
 
 function polars.read_csv(path, options)
@@ -2432,7 +2468,7 @@ function polars.read_csv(path, options)
     rename_columns, encoding, named_null_columns, named_null_values,
     try_parse_dates, truncate_ragged_lines, ignore_errors,
     skip_rows_after_header, decimal_comma, raise_if_empty,
-    infer_schema_length, low_memory = csv_options(options)
+    infer_schema_length, low_memory, rechunk = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -2563,7 +2599,13 @@ function polars.read_csv(path, options)
     pointer = lib.pl_dataframe_read_csv_projected(path, delimiter,
       header and 1 or 0, quote, comment, names, #columns, err)
   end
-  return new_frame(pointer, err)
+  local frame = new_frame(pointer, err)
+  if rechunk then
+    local compact = frame:rechunk()
+    frame:close()
+    return compact
+  end
+  return frame
 end
 
 local PARQUET_READ_OPTION_KEYS = {

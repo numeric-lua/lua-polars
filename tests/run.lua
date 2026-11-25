@@ -4492,6 +4492,94 @@ test("unnest expands struct columns", function()
   truthy(tostring(err):find("closed", 1, true), "closed unnest error")
 end)
 
+test("scalar aggregates summarize one column", function()
+  local df = polars.read_csv(fixture)
+  eq(df:sum("score"), 43)
+  eq(df:mean("score"), 8.6)
+  eq(df:min("score"), 5)
+  eq(df:max("score"), 12)
+  eq(df:min("name"), "ana")
+  eq(df:max("name"), "eva")
+
+  local empty = df:head(0)
+  eq(empty:sum("score"), polars.null)
+  eq(empty:mean("score"), polars.null)
+  eq(empty:min("score"), polars.null)
+  eq(empty:max("score"), polars.null)
+  empty:close()
+
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("score\n1\n\n3\n")
+  file:close()
+  local nullable = polars.read_csv(path)
+  eq(nullable:sum("score"), 4)
+  eq(nullable:mean("score"), 2)
+  eq(nullable:min("score"), 1)
+  eq(nullable:max("score"), 3)
+  nullable:close()
+  df:close()
+end)
+
+test("scalar aggregates reject invalid columns and closed frames", function()
+  local df = polars.read_csv(fixture)
+  local methods = { "sum", "mean", "min", "max" }
+  for _, method in ipairs(methods) do
+    local ok, err = pcall(function() df[method](df, 42) end)
+    eq(ok, false, method .. " accepted a non-string column")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      method .. " type error: " .. tostring(err))
+    ok, err = pcall(function() df[method](df, "") end)
+    eq(ok, false, method .. " accepted an empty column")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      method .. " empty error: " .. tostring(err))
+    ok, err = pcall(function() df[method](df, "missing") end)
+    eq(ok, false, method .. " accepted an unknown column")
+    truthy(tostring(err):find("is not a column", 1, true),
+      method .. " unknown error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:sum("name") end)
+  eq(ok, false, "sum accepted a string column")
+  truthy(tostring(err):find("not supported", 1, true),
+    "string sum error: " .. tostring(err))
+  df:close()
+  for _, method in ipairs(methods) do
+    local closed_ok, closed_err = pcall(function() df[method](df, "score") end)
+    eq(closed_ok, false, method .. " accepted a closed frame")
+    truthy(tostring(closed_err):find("closed", 1, true),
+      method .. " closed error")
+  end
+end)
+
+test("read_csv rechunk returns single-chunk columns", function()
+  local df = polars.read_csv(fixture)
+  local compact = polars.read_csv(fixture, { rechunk = true })
+  eq(compact:max_chunks(), 1, "read_csv rechunk did not consolidate chunks")
+  eq(compact:shape(), df:shape())
+  eq(table.concat(compact:columns(), ","), table.concat(df:columns(), ","))
+  eq(compact:schema().score, df:schema().score)
+  eq(compact:to_table()[1].name, "ana")
+  compact:close()
+
+  local combined = polars.read_csv(fixture, {
+    rechunk = true,
+    low_memory = true,
+    columns = { "score", "name" },
+    n_rows = 2,
+  })
+  eq(combined:shape(), 2)
+  eq(combined:max_chunks(), 1)
+  eq(table.concat(combined:columns(), ","), "score,name")
+  eq(combined:to_table()[1].score, 10)
+  combined:close()
+  df:close()
+
+  local ok, err = pcall(polars.read_csv, fixture, { rechunk = "true" })
+  eq(ok, false, "non-boolean read_csv rechunk accepted")
+  truthy(tostring(err):find("rechunk", 1, true),
+    "read_csv rechunk error: " .. tostring(err))
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()
