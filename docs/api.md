@@ -284,6 +284,15 @@ frame. Calling it on a closed frame is an error.
 local bytes = df:estimated_size()
 ```
 
+### `df:max_chunks() -> integer`
+
+Returns the largest chunk count across the frame's columns. A fresh or
+rechunked frame typically reports `1`.
+
+```lua
+local chunks = df:max_chunks()
+```
+
 ### `df:rechunk() -> DataFrame`
 
 Returns a new frame with a single chunk per column. The schema, values, and row
@@ -292,6 +301,15 @@ frame is an error.
 
 ```lua
 local compact = df:rechunk()
+```
+
+### `df:shrink_to_fit() -> DataFrame`
+
+Returns a copy with excess allocation capacity released. Schema, values, and
+row order are unchanged, and the input frame stays open.
+
+```lua
+local compact = df:shrink_to_fit()
 ```
 
 ### `df:schema() -> table`
@@ -468,8 +486,17 @@ validated numeric subset rules as the other cumulative operations.
 local seen = df:cum_count("score")
 ```
 
+### `df:cum_prod([columns]) -> DataFrame`
+
+Computes a forward running product with the same all-numeric default and
+validated numeric subset rules as the other cumulative operations.
+
+```lua
+local product = df:cum_prod("score")
+```
+
 Malformed, duplicate, empty, unknown, or non-numeric column subsets and closed
-frames are errors for all four cumulative operations.
+frames are errors for all five cumulative operations.
 
 ### `df:clip(min, max [, columns]) -> DataFrame`
 
@@ -556,6 +583,23 @@ local compact = df:explode("tags", {
 
 Unknown option keys, non-boolean flags, empty or malformed column lists,
 non-list columns, unknown columns, and closed frames are errors.
+
+### `df:unnest([columns [, separator]]) -> DataFrame`
+
+Expands one or more `Struct` columns into their field columns. With no
+`columns` every struct column is expanded; an explicit name or contiguous list
+must name struct columns. `separator` is an optional prefix: when set, each
+output field is named `column{separator}field`. The input frame is unchanged
+and the result keeps the non-struct columns in frame order.
+
+```lua
+local expanded = df:unnest("meta")
+local prefixed = df:unnest({ "meta" }, "_")
+```
+
+Malformed, duplicate, empty, or unknown column subsets, non-struct columns, a
+non-string separator, a frame with no struct columns, and closed frames are
+errors.
 
 ### `df:drop_nulls([columns]) -> DataFrame`
 
@@ -958,6 +1002,21 @@ non-numeric, or above-`2^53 - 1` float precision values, non-boolean
 `include_bom`/`decimal_comma`, closed frames, non-string or empty paths, and
 write failures.
 
+### `df:to_csv([options]) -> string`
+
+Returns the frame as CSV text. `options` is the same table accepted by
+`write_csv`, including delimiter, header, null placeholder, line terminator,
+quote style, float precision, BOM, and decimal-comma controls. With no options
+the text is byte-identical to `write_csv`'s default comma/header/empty-null
+output.
+
+```lua
+local text = df:to_csv()
+local headerless = df:to_csv({ delimiter = ";", header = false })
+```
+
+Unknown option keys, invalid option values, and closed frames are errors.
+
 ### `df:write_json(path [, options]) -> DataFrame`
 
 Writes the frame as JSON and returns `df` for chaining. The file is created or
@@ -1210,6 +1269,8 @@ void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 int pl_dataframe_estimated_size(
     PlFrame *frame, uint64_t *bytes, char **err);
+int pl_dataframe_max_chunks(
+    PlFrame *frame, uint64_t *out, char **err);
 int pl_dataframe_is_sorted(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     const int32_t *descending, uint64_t descending_count,
@@ -1224,6 +1285,10 @@ PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_rechunk(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_shrink_to_fit(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_unnest(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    const char *separator, char **err);
 PlFrame *pl_dataframe_transpose(
     PlFrame *frame, const char *keep_names_as, char **err);
 PlFrame *pl_dataframe_shift(
@@ -1297,6 +1362,11 @@ int pl_dataframe_write_csv_complete(
     const char *line_terminator, const char *quote_style,
     int64_t float_precision, int32_t include_bom, int32_t decimal_comma,
     char **err);
+char *pl_dataframe_to_csv(
+    PlFrame *frame, const char *delimiter, int32_t has_header,
+    const char *null_value, const char *line_terminator,
+    const char *quote_style, int64_t float_precision, int32_t include_bom,
+    int32_t decimal_comma, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
@@ -1345,13 +1415,19 @@ Explicit `dtypes` overrides still take precedence.
 Polars' lower-memory CSV reader path; the schema and values are unchanged.
 
 `pl_dataframe_estimated_size` writes Polars' approximate in-memory byte count to
-`uint64_t *bytes` and returns zero on success. `pl_dataframe_is_sorted` checks
-one or more keys with a parallel descending-flag array and a single
-`nulls_last` flag, writing the Boolean result to `int32_t *out`.
+`uint64_t *bytes` and returns zero on success. `pl_dataframe_max_chunks` writes
+the largest chunk count across columns to `uint64_t *out`.
+`pl_dataframe_is_sorted` checks one or more keys with a parallel
+descending-flag array and a single `nulls_last` flag, writing the Boolean result
+to `int32_t *out`.
 
 `pl_dataframe_reverse` returns a newly owned frame with the same columns and
 reversed row order. `pl_dataframe_rechunk` returns a copy consolidated into
-single-chunk columns. `pl_dataframe_transpose` swaps rows and columns,
+single-chunk columns, and `pl_dataframe_shrink_to_fit` returns a copy with
+excess allocation capacity released. `pl_dataframe_unnest` expands borrowed
+struct columns; a null/zero list targets every struct column, and an optional
+non-empty separator prefixes each output field with its struct name.
+`pl_dataframe_transpose` swaps rows and columns,
 optionally naming the output column that receives the original column names;
 Polars casts all values to a common supertype. `pl_dataframe_shift` borrows an
 optional column list; a
@@ -1402,6 +1478,11 @@ digits after the decimal point for float columns.
 decimal_comma`. A non-zero `include_bom` prepends `EF BB BF`; a non-zero
 `decimal_comma` formats float fields with a comma decimal separator. Both
 default to zero in every earlier writer entry point.
+
+`pl_dataframe_to_csv` takes the same writer configuration as
+`pl_dataframe_write_csv_complete` and returns the CSV bytes as a
+NUL-terminated string instead of writing a file. The returned string must be
+freed with `pl_string_free`.
 
 Returned `char *` values and error strings must be freed with
 `pl_string_free`. A null frame pointer indicates an error when `err` is set.
@@ -1562,10 +1643,10 @@ array when `json_lines` is zero or as one object per line otherwise. The
 returned string has the same Polars conventions as `pl_dataframe_to_json` and
 must be freed with `pl_string_free`.
 
-`pl_dataframe_cumulative` applies `sum`, `min`, `max`, or `count` forward over
-every numeric column or a borrowed validated subset. `count` is a running count
-of non-null values and produces `u32`; the other operations preserve their
-input dtypes.
+`pl_dataframe_cumulative` applies `sum`, `min`, `max`, `count`, or `prod`
+forward over every numeric column or a borrowed validated subset. `count` is a
+running count of non-null values and produces `u32`; the other operations
+preserve their input dtypes.
 
 `pl_dataframe_to_json_pretty` returns an indented JSON array string with the
 same values as `pl_dataframe_to_json`. JSON Lines is not supported by this

@@ -76,9 +76,17 @@ local cumulative = row_tools:cum_sum("score")
 check(cumulative:to_table()[5].score == 43,
   "unexpected cumulative sum")
 cumulative:close()
+local product = row_tools:cum_prod("score")
+check(product:to_table()[5].score == 37800,
+  "unexpected cumulative product")
+product:close()
 local compact = row_tools:rechunk()
 check(compact:shape() == row_tools:shape(), "rechunk changed the shape")
+check(compact:max_chunks() == 1, "rechunk did not produce one chunk")
 compact:close()
+local shrunk = row_tools:shrink_to_fit()
+check(shrunk:shape() == row_tools:shape(), "shrink changed the shape")
+shrunk:close()
 local duplicated = row_tools:is_duplicated()
 check(duplicated:columns()[5] == "duplicated",
   "duplicate marker was not appended")
@@ -296,6 +304,15 @@ local roundtrip_fixture = fixture:gsub("sample%.csv$", "roundtrip.csv")
 local written = os.tmpname()
 os.remove(written)
 local writer = polars.read_csv(roundtrip_fixture)
+local csv_text = writer:to_csv({
+  delimiter = ";",
+  header = false,
+  null_value = "NA",
+})
+check(csv_text:find("1;ana;", 1, true) ~= nil,
+  "unexpected to_csv first row")
+check(csv_text:find("3;caio;NA\n", 1, true) ~= nil,
+  "unexpected to_csv null placeholder")
 
 local bom_path = os.tmpname()
 os.remove(bom_path)
@@ -496,6 +513,19 @@ check(lenient:to_table()[3].x == polars.null,
   "unexpected lenient JSON null")
 lenient:close()
 os.remove(lenient_json)
+
+local nested_json = os.tmpname()
+local nested_json_file = assert(io.open(nested_json, "w"))
+nested_json_file:write('[{"id":1,"meta":{"a":1,"b":"x"}}]')
+nested_json_file:close()
+local nested = polars.read_json(nested_json)
+local expanded = nested:unnest()
+check(table.concat(expanded:columns(), ",") == "id,a,b",
+  "unexpected unnest column order")
+check(expanded:to_table()[1].b == "x", "unexpected unnest value")
+expanded:close()
+nested:close()
+os.remove(nested_json)
 
 local parquet_out = os.tmpname()
 os.remove(parquet_out)

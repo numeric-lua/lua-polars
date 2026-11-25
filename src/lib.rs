@@ -2143,6 +2143,39 @@ pub unsafe extern "C" fn pl_dataframe_estimated_size(
     }
 }
 
+/// Reports the largest chunk count across the frame's columns.
+///
+/// The value is written to `out` and the function returns zero on success.
+/// This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_max_chunks(
+    ptr: *mut PlFrame,
+    out: *mut u64,
+    err: *mut *mut c_char,
+) -> i32 {
+    if out.is_null() {
+        return 2;
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<u64, String> {
+        let frame = frame_ref(ptr)?;
+        Ok(frame.df.max_n_chunks() as u64)
+    }));
+    match result {
+        Ok(Ok(value)) => {
+            *out = value;
+            0
+        },
+        Ok(Err(message)) => {
+            set_error(err, message);
+            1
+        },
+        Err(payload) => {
+            set_error(err, panic_message(payload));
+            1
+        },
+    }
+}
+
 /// Checks whether rows are already sorted by one or more columns.
 ///
 /// `columns` points to `column_count` names. `descending` points to the same
@@ -2390,6 +2423,88 @@ pub unsafe extern "C" fn pl_dataframe_rechunk(
     finish_frame(result, err)
 }
 
+/// Returns a copy with excess allocation capacity released.
+///
+/// The schema, values, and row order are unchanged, and the input frame stays
+/// open. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_shrink_to_fit(
+    ptr: *mut PlFrame,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let mut output = frame.df.clone();
+        output.shrink_to_fit();
+        Ok(output)
+    }));
+    finish_frame(result, err)
+}
+
+/// Expands struct columns into their field columns.
+///
+/// A null/zero `columns` count targets every `Struct` column; an explicit list
+/// must name struct columns. `separator` is an optional non-empty prefix
+/// separator: when set, output fields are named `column{separator}field`.
+/// Column order otherwise follows Polars' struct expansion. This entry point is
+/// additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_unnest(
+    ptr: *mut PlFrame,
+    columns: *const *const c_char,
+    column_count: u64,
+    separator: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let mut names = read_name_list(columns, column_count, "unnest columns")?;
+        if names.is_empty() {
+            names = frame
+                .df
+                .columns()
+                .iter()
+                .filter(|column| matches!(column.dtype(), DataType::Struct(_)))
+                .map(|column| column.name().to_string())
+                .collect();
+        }
+        if names.is_empty() {
+            return Err("unnest requires at least one struct column".to_string());
+        }
+        for name in &names {
+            let column = frame
+                .df
+                .column(name.as_str())
+                .map_err(|_| format!("unnest column '{name}' is not a column in the DataFrame"))?;
+            if !matches!(column.dtype(), DataType::Struct(_)) {
+                return Err(format!(
+                    "unnest column '{name}' has dtype {}; expected a struct",
+                    column.dtype()
+                ));
+            }
+        }
+        let separator = if separator.is_null() {
+            None
+        } else {
+            let value = read_utf8(separator, "unnest separator")?;
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        };
+        let names: Vec<PlSmallStr> = names
+            .iter()
+            .map(|name| PlSmallStr::from_str(name.as_str()))
+            .collect();
+        frame
+            .df
+            .unnest(names, separator.as_deref())
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 /// Transposes a frame so columns become rows and rows become columns.
 ///
 /// `keep_names_as` is an optional non-empty column name that receives the
@@ -2623,11 +2738,11 @@ pub unsafe extern "C" fn pl_dataframe_diff(
 
 /// Applies a forward cumulative numeric operation to selected columns.
 ///
-/// `operation` is `sum`, `min`, `max`, or `count`, matched case-insensitively.
-/// A null/zero `columns` count targets every primitive numeric column; an
-/// explicit list must name numeric columns. `count` is a running count of
-/// non-null values. Column order and the input frame are preserved. This entry
-/// point is additive.
+/// `operation` is `sum`, `min`, `max`, `count`, or `prod`, matched
+/// case-insensitively. A null/zero `columns` count targets every primitive
+/// numeric column; an explicit list must name numeric columns. `count` is a
+/// running count of non-null values. Column order and the input frame are
+/// preserved. This entry point is additive.
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_cumulative(
     ptr: *mut PlFrame,
@@ -2640,9 +2755,12 @@ pub unsafe extern "C" fn pl_dataframe_cumulative(
         let frame = frame_ref(ptr)?;
         let operation = read_utf8(operation, "cumulative operation")?;
         let operation = operation.to_ascii_lowercase();
-        if !matches!(operation.as_str(), "sum" | "min" | "max" | "count") {
+        if !matches!(
+            operation.as_str(),
+            "sum" | "min" | "max" | "count" | "prod"
+        ) {
             return Err(format!(
-                "unsupported cumulative operation '{operation}'; expected sum, min, max, or count"
+                "unsupported cumulative operation '{operation}'; expected sum, min, max, count, or prod"
             ));
         }
         let requested = read_name_list(columns, column_count, "cumulative columns")?;
@@ -2658,6 +2776,7 @@ pub unsafe extern "C" fn pl_dataframe_cumulative(
                 "min" => column.cum_min(false),
                 "max" => column.cum_max(false),
                 "count" => column.cum_count(false),
+                "prod" => column.cum_prod(false),
                 _ => unreachable!("operation was validated"),
             };
             expressions.push(expression.alias(name.as_str()));
@@ -3753,6 +3872,73 @@ pub unsafe extern "C" fn pl_dataframe_write_csv_complete(
         write_csv_frame(&frame.df, &path, config)
     }));
     finish_write(result, err)
+}
+
+/// Serializes a frame as CSV text.
+///
+/// The arguments match [`pl_dataframe_write_csv_complete`] but return the bytes
+/// as a NUL-terminated string instead of writing a file. The returned string
+/// must be freed with [`pl_string_free`]. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_to_csv(
+    ptr: *mut PlFrame,
+    delimiter: *const c_char,
+    has_header: i32,
+    null_value: *const c_char,
+    line_terminator: *const c_char,
+    quote_style: *const c_char,
+    float_precision: i64,
+    include_bom: i32,
+    decimal_comma: i32,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<String, String> {
+        let frame = frame_ref(ptr)?;
+        let delimiter = read_delimiter(delimiter)?;
+        let quote_style_name = if quote_style.is_null() {
+            None
+        } else {
+            Some(read_utf8(quote_style, "quote_style")?)
+        };
+        let config = CsvWriteConfig {
+            delimiter,
+            include_header: has_header != 0,
+            null_value: read_csv_null_value(null_value, delimiter)?,
+            line_terminator: read_csv_line_terminator(line_terminator)?,
+            quote_style: parse_csv_quote_style(quote_style_name.as_deref())?,
+            float_precision: parse_csv_float_precision(float_precision)?,
+            include_bom: include_bom != 0,
+            decimal_comma: decimal_comma != 0,
+        };
+        let mut df = frame.df.clone();
+        let mut buffer = Vec::new();
+        let mut writer = CsvWriter::new(&mut buffer)
+            .include_header(config.include_header)
+            .include_bom(config.include_bom)
+            .with_separator(config.delimiter)
+            .with_line_terminator(PlSmallStr::from_str(&config.line_terminator))
+            .with_quote_style(config.quote_style)
+            .with_float_precision(config.float_precision)
+            .with_decimal_comma(config.decimal_comma);
+        if let Some(null_value) = config.null_value {
+            writer = writer.with_null_value(PlSmallStr::from_str(&null_value));
+        }
+        writer
+            .finish(&mut df)
+            .map_err(|error| error.to_string())?;
+        String::from_utf8(buffer).map_err(|error| error.to_string())
+    }));
+    match result {
+        Ok(Ok(csv)) => c_string(&csv),
+        Ok(Err(message)) => {
+            set_error(err, message);
+            ptr::null_mut()
+        },
+        Err(payload) => {
+            set_error(err, panic_message(payload));
+            ptr::null_mut()
+        },
+    }
 }
 
 /// Parses the optional Parquet compression codec name.

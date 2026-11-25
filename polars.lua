@@ -169,6 +169,8 @@ void pl_dataframe_free(PlFrame *frame);
 int pl_dataframe_shape(PlFrame *frame, uint64_t *rows, uint64_t *cols);
 int pl_dataframe_estimated_size(
     PlFrame *frame, uint64_t *bytes, char **err);
+int pl_dataframe_max_chunks(
+    PlFrame *frame, uint64_t *out, char **err);
 int pl_dataframe_is_sorted(
     PlFrame *frame, const char *const *columns, uint64_t column_count,
     const int32_t *descending, uint64_t descending_count,
@@ -183,6 +185,10 @@ PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_rechunk(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_shrink_to_fit(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_unnest(
+    PlFrame *frame, const char *const *columns, uint64_t column_count,
+    const char *separator, char **err);
 PlFrame *pl_dataframe_transpose(
     PlFrame *frame, const char *keep_names_as, char **err);
 PlFrame *pl_dataframe_shift(
@@ -256,6 +262,11 @@ int pl_dataframe_write_csv_complete(
     const char *line_terminator, const char *quote_style,
     int64_t float_precision, int32_t include_bom, int32_t decimal_comma,
     char **err);
+char *pl_dataframe_to_csv(
+    PlFrame *frame, const char *delimiter, int32_t has_header,
+    const char *null_value, const char *line_terminator,
+    const char *quote_style, int64_t float_precision, int32_t include_bom,
+    int32_t decimal_comma, char **err);
 int pl_dataframe_write_parquet(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
@@ -410,6 +421,17 @@ function DataFrame:estimated_size()
   return tonumber(bytes[0])
 end
 
+-- Largest chunk count across the frame's columns.
+function DataFrame:max_chunks()
+  local chunks = ffi.new("uint64_t[1]")
+  local err = ffi.new("char *[1]")
+  local status = lib.pl_dataframe_max_chunks(self:_require_open(), chunks, err)
+  if status ~= 0 then
+    error(take_error(err), 2)
+  end
+  return tonumber(chunks[0])
+end
+
 function DataFrame:schema()
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_schema_json(self:_require_open(), err)
@@ -493,6 +515,13 @@ end
 function DataFrame:rechunk()
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_rechunk(self:_require_open(), err)
+  return new_frame(pointer, err)
+end
+
+-- Releases excess allocation capacity in a copy of the frame.
+function DataFrame:shrink_to_fit()
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_shrink_to_fit(self:_require_open(), err)
   return new_frame(pointer, err)
 end
 
@@ -1320,6 +1349,11 @@ function DataFrame:cum_count(columns)
   return cumulative(self, columns, "count", "cum_count")
 end
 
+-- Running product over every numeric column or a validated numeric subset.
+function DataFrame:cum_prod(columns)
+  return cumulative(self, columns, "prod", "cum_prod")
+end
+
 -- Positive n keeps rows offset, offset+n, offset+2n, and so on. offset
 -- defaults to 0 and is a zero-based row index; an offset past the end returns
 -- an empty frame with the same schema.
@@ -1391,6 +1425,28 @@ function DataFrame:null_mask(name)
   end
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_null_mask(self:_require_open(), name, err)
+  return new_frame(pointer, err)
+end
+
+-- Expands struct columns into field columns. With no columns every struct
+-- column is expanded; separator optionally prefixes the field names.
+function DataFrame:unnest(columns, separator)
+  local selected = subset_columns(self, columns, "unnest")
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  if separator ~= nil and type(separator) ~= "string" then
+    error("unnest separator must be a string", 2)
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_unnest(self:_require_open(), names, count,
+    separator, err)
   return new_frame(pointer, err)
 end
 
@@ -1521,6 +1577,20 @@ function DataFrame:write_csv(path, options)
   end
   return self
 end
+
+-- CSV writer options are shared with write_csv; the result is returned as text.
+function DataFrame:to_csv(options)
+  local delimiter, header, null_value, line_terminator, quote_style,
+    float_precision, include_bom, decimal_comma =
+    write_csv_options(options == nil and {} or options)
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_to_csv(self:_require_open(), delimiter,
+    header and 1 or 0, null_value, line_terminator,
+    quote_style or "necessary", float_precision or -1,
+    include_bom and 1 or 0, decimal_comma and 1 or 0, err)
+  return string_result(pointer, err)
+end
+
 function DataFrame:write_parquet(path, options)
   if options == nil then
     return write_frame(self, path, "pl_dataframe_write_parquet")

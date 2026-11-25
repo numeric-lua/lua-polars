@@ -39,7 +39,23 @@
   unchanged;
 - validation covers malformed or non-numeric cumulative subsets, non-boolean
   `pretty`, `pretty` with JSON Lines, and closed frames;
-- `./scripts/test.sh` passes 196 tests; `./scripts/smoke.sh` and
+- five more DataFrame/IO additions:
+  - `df:cum_prod([columns])` adds the forward running product to the cumulative
+    family;
+  - `df:to_csv([options])` returns the CSV text for the same writer options as
+    `write_csv`, with byte-identical default output;
+  - `df:max_chunks()` reports the largest chunk count across columns;
+  - `df:shrink_to_fit()` returns a copy with excess allocation capacity
+    released;
+  - `df:unnest([columns [, separator]])` expands struct columns into field
+    columns, optionally prefixing each field with the struct name;
+- the new C ABI entry points are `pl_dataframe_to_csv`,
+  `pl_dataframe_max_chunks`, `pl_dataframe_shrink_to_fit`, and
+  `pl_dataframe_unnest`; every earlier signature and default is unchanged;
+- validation covers malformed or non-numeric cumulative subsets, unknown or
+  non-struct unnest columns, non-string separators, unknown CSV writer options,
+  and closed frames;
+- `./scripts/test.sh` passes 201 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

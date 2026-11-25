@@ -4303,7 +4303,7 @@ end)
 
 test("cumulative operations reject invalid subsets", function()
   local df = polars.read_csv(fixture)
-  local methods = { "cum_sum", "cum_min", "cum_max", "cum_count" }
+  local methods = { "cum_sum", "cum_min", "cum_max", "cum_count", "cum_prod" }
   local cases = {
     { 42, "columns must be a column name or a list of names" },
     { {}, "columns must not be empty" },
@@ -4363,6 +4363,133 @@ test("to_json pretty writes an indented string", function()
   ok, err = pcall(function() df:to_json({ pretty = true }) end)
   eq(ok, false, "closed pretty to_json accepted")
   truthy(tostring(err):find("closed", 1, true), "closed pretty to_json error")
+end)
+
+test("cum_prod computes a running product", function()
+  local df = polars.read_csv(fixture)
+  local product = df:cum_prod("score")
+  eq(product:shape(), df:shape())
+  eq(product:schema().score, "i64")
+  local rows = product:to_table()
+  eq(rows[1].score, 10)
+  eq(rows[2].score, 70)
+  eq(rows[3].score, 840)
+  eq(rows[4].score, 4200)
+  eq(rows[5].score, 37800)
+  product:close()
+  local all = df:cum_prod()
+  eq(all:to_table()[1].name, "ana")
+  eq(all:to_table()[5].score, 37800)
+  all:close()
+  df:close()
+end)
+
+test("to_csv returns text matching write_csv", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local path = new_temp_path(".csv")
+  df:write_csv(path)
+  local expected = read_file(path)
+  eq(df:to_csv(), expected, "default to_csv differs from write_csv")
+  eq(df:to_csv({}), expected, "empty to_csv options changed the output")
+
+  df:write_csv(path, {
+    delimiter = ";",
+    header = false,
+    null_value = "NA",
+    line_terminator = "\r\n",
+  })
+  expected = read_file(path)
+  eq(df:to_csv({
+    delimiter = ";",
+    header = false,
+    null_value = "NA",
+    line_terminator = "\r\n",
+  }), expected, "configured to_csv differs from write_csv")
+
+  local ok, err = pcall(function() df:to_csv({ rows = 1 }) end)
+  eq(ok, false, "unknown to_csv option accepted")
+  truthy(tostring(err):find("unknown field", 1, true),
+    "to_csv option error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:to_csv() end)
+  eq(ok, false, "closed to_csv accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed to_csv error")
+end)
+
+test("max_chunks reports and rechunk reduces chunk count", function()
+  local df = polars.read_csv(fixture)
+  truthy(df:max_chunks() >= 1, "max_chunks should be positive")
+  local rechunked = df:rechunk()
+  eq(rechunked:max_chunks(), 1, "rechunk did not produce one chunk")
+  rechunked:close()
+  df:close()
+  local ok, err = pcall(function() df:max_chunks() end)
+  eq(ok, false, "closed max_chunks accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed max_chunks error")
+end)
+
+test("shrink_to_fit preserves the frame", function()
+  local df = polars.read_csv(fixture)
+  local shrunk = df:shrink_to_fit()
+  eq(shrunk:shape(), df:shape())
+  eq(table.concat(shrunk:columns(), ","), table.concat(df:columns(), ","))
+  eq(shrunk:schema().score, df:schema().score)
+  eq(shrunk:to_table()[5].name, "eva")
+  eq(df:to_table()[1].name, "ana", "shrink_to_fit changed the input frame")
+  shrunk:close()
+  df:close()
+  local ok, err = pcall(function() df:shrink_to_fit() end)
+  eq(ok, false, "closed shrink_to_fit accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed shrink_to_fit error")
+end)
+
+test("unnest expands struct columns", function()
+  local path = new_temp_path(".json")
+  local file = assert(io.open(path, "w"))
+  file:write('[{"id":1,"meta":{"a":1,"b":"x"}},' ..
+    '{"id":2,"meta":{"a":2,"b":"y"}}]')
+  file:close()
+  local nested = polars.read_json(path)
+  eq(nested:schema().meta, "struct[2]")
+  local expanded = nested:unnest()
+  eq(table.concat(expanded:columns(), ","), "id,a,b")
+  eq(expanded:shape(), 2)
+  local rows = expanded:to_table()
+  eq(rows[1].id, 1)
+  eq(rows[1].a, 1)
+  eq(rows[1].b, "x")
+  eq(rows[2].b, "y")
+  expanded:close()
+
+  local prefixed = nested:unnest("meta", "_")
+  eq(table.concat(prefixed:columns(), ","), "id,meta_a,meta_b")
+  eq(prefixed:to_table()[2].meta_a, 2)
+  prefixed:close()
+  eq(nested:schema().meta, "struct[2]", "unnest changed the input frame")
+
+  local ok, err = pcall(function() nested:unnest("id") end)
+  eq(ok, false, "unnest accepted a non-struct column")
+  truthy(tostring(err):find("expected a struct", 1, true),
+    "non-struct unnest error: " .. tostring(err))
+  ok, err = pcall(function() nested:unnest("missing") end)
+  eq(ok, false, "unnest accepted an unknown column")
+  truthy(tostring(err):find("is not a column", 1, true),
+    "unknown unnest error: " .. tostring(err))
+  nested:close()
+
+  local flat = polars.read_csv(fixture)
+  ok, err = pcall(function() flat:unnest() end)
+  eq(ok, false, "unnest accepted a frame without structs")
+  truthy(tostring(err):find("at least one struct", 1, true),
+    "no-struct unnest error: " .. tostring(err))
+  ok, err = pcall(function() flat:unnest(nil, 42) end)
+  eq(ok, false, "non-string unnest separator accepted")
+  truthy(tostring(err):find("separator must be a string", 1, true),
+    "unnest separator error: " .. tostring(err))
+  flat:close()
+  ok, err = pcall(function() flat:unnest() end)
+  eq(ok, false, "closed unnest accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed unnest error")
 end)
 
 cleanup_temp_files()

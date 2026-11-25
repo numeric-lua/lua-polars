@@ -72,17 +72,20 @@ end
   checks, `top_k`/`bottom_k`, group-by, `value_counts`, drop, rename, and
   with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
-- row-oriented `to_table()` and `to_json([options])` for compact, pretty, or
-  JSON Lines strings, plus `read_json`/`write_json`
+- row-oriented `to_table()`, `to_json([options])` for compact, pretty, or JSON
+  Lines strings, and `to_csv([options])` for CSV text, plus
+  `read_json`/`write_json`
 - `reverse()` for row order, `transpose([options])` for swapping rows and
   columns, `shift(periods [, columns])` for lag/lead, `diff(periods
   [, columns])` for numeric differences and `clip(min, max [, columns])` for
-  inclusive numeric bounds, `cum_sum`/`cum_min`/`cum_max`/`cum_count` for
-  forward cumulative columns, `cast(mapping)` for strict column dtype changes,
-  `unique([columns, options])` with subsets and first/last/none/any keep
-  strategies, and `explode(columns [, options])` for list columns
-- `estimated_size()` reports the approximate in-memory byte footprint and
-  `rechunk()` consolidates each column into one chunk
+  inclusive numeric bounds, `cum_sum`/`cum_min`/`cum_max`/`cum_count`/
+  `cum_prod` for forward cumulative columns, `cast(mapping)` for strict column
+  dtype changes, `unique([columns, options])` with subsets and
+  first/last/none/any keep strategies, `explode(columns [, options])` for list
+  columns, and `unnest([columns [, separator]])` for struct columns
+- `estimated_size()` reports the approximate in-memory byte footprint,
+  `max_chunks()` reports the largest chunk count, `rechunk()` consolidates each
+  column into one chunk, and `shrink_to_fit()` releases excess capacity
 - `take(indices)` selects rows by 1-based or negative position, while
   `is_duplicated([name])`/`is_unique([name])` append a Boolean marker column
   for repeated or single-occurrence full rows, `null_mask([name])` appends a
@@ -145,12 +148,12 @@ options, UTF-8 BOM, pretty JSON output, and decimal-comma output,
 Parquet column projections, row windows, low-memory and rechunk reads,
 compression codecs, statistics and chunk-size writer options, JSON array/JSON
 Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
-CSV low-memory reads, schema, estimated size, rechunking, head, tail, slice,
-row indexing, projection, row reversal, transpose, sortedness checks,
-cumulative transforms, strict casting, subset distinct rows, list-column
-explode, filtering, sorting with null placement, grouping, all eager join
-types, column operations, SQL, JSON conversion and pretty strings, and error
-paths. The smoke test installs the module and bridge
+CSV low-memory reads and CSV text output, schema, estimated size, chunk counts,
+rechunking, shrinking, head, tail, slice, row indexing, projection, row
+reversal, transpose, sortedness checks, cumulative transforms, struct unnest,
+strict casting, subset distinct rows, list-column explode, filtering, sorting
+with null placement, grouping, all eager join types, column operations, SQL,
+JSON conversion and pretty strings, and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
 `POLARS_LUA_LIB`.
 The rockspec check validates the release version references, installs the same
@@ -251,9 +254,12 @@ df:shape()                -- rows, cols
 df:schema()               -- { column = "i64", ... }
 df:columns()              -- ordered column names
 df:estimated_size()       -- approximate bytes
+df:max_chunks()
 df:rechunk()
+df:shrink_to_fit()
 df:is_sorted("score", false)
 df:transpose({ keep_names_as = "field" })
+df:unnest("meta", "_")
 df:head(n)
 df:tail(n)
 df:slice(offset, length)
@@ -267,6 +273,7 @@ df:cum_sum("score")
 df:cum_min("score")
 df:cum_max("score")
 df:cum_count("score")
+df:cum_prod("score")
 df:clip(0, 100, { "score", "bonus" })
 df:cast({ score = "f64" })
 df:unique("team", { keep = "last" })
@@ -303,6 +310,7 @@ df:write_csv("quoted.csv", { quote_style = "always" })
 df:write_csv("rounded.csv", { float_precision = 2 })
 df:write_csv("utf8.csv", { include_bom = true })
 df:write_csv("european.csv", { delimiter = ";", decimal_comma = true })
+df:to_csv({ delimiter = ";", header = false })
 df:write_parquet("out.parquet")
 df:write_parquet("out.parquet", {
   compression = "snappy",
