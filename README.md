@@ -45,7 +45,8 @@ end
   `encoding = "utf8-lossy"` for invalid UTF-8 input,
   `truncate_ragged_lines = true` to truncate rows wider than the header,
   `ignore_errors = true` to keep parsable rows when a value cannot be parsed,
-  and `raise_if_empty = false` to read an empty file as an empty frame
+  `low_memory = true` for Polars' lower-memory reader path, and
+  `raise_if_empty = false` to read an empty file as an empty frame
 - CSV writer options: a one-byte `delimiter`, `header = false` to omit the
   header row, a literal `null_value` placeholder for null fields, a
   `line_terminator` of `"\n"` or `"\r\n"`, a `quote_style` of
@@ -63,22 +64,24 @@ end
   `"lines"`/`"ndjson"`, a `columns` name/list projection, a non-negative
   `infer_schema_length` for JSON Lines (`0` scans the whole stream), and
   `ignore_errors = true` to turn unparsable JSON Lines values into nulls; JSON
-  writers support the same array/lines formats
+  writers support the same array/lines formats, with `pretty = true` for an
+  indented array
 - schema, shape, head/tail/slice, ordered columns, and `with_row_index`
 - SQL queries against the DataFrame registered as `df`
-- helpers for select, filter, sort, sortedness checks, `top_k`/`bottom_k`,
-  group-by, `value_counts`, drop, rename, and with-columns that preserve
-  column order
+- helpers for select, filter, sort (including null placement), sortedness
+  checks, `top_k`/`bottom_k`, group-by, `value_counts`, drop, rename, and
+  with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()` and `to_json([options])` for arrays or JSON Lines,
   plus `read_json`/`write_json`
 - `reverse()` for row order, `transpose([options])` for swapping rows and
-  columns, `shift(periods [, columns])` for lag/lead and `clip(min, max
-  [, columns])` for inclusive numeric bounds, `cast(mapping)` for strict column
-  dtype changes, `unique([columns, options])` with subsets and
-  first/last/none/any keep strategies, and `explode(columns [, options])` for
-  list columns
-- `estimated_size()` reports the approximate in-memory byte footprint
+  columns, `shift(periods [, columns])` for lag/lead, `diff(periods
+  [, columns])` for numeric differences and `clip(min, max [, columns])` for
+  inclusive numeric bounds, `cast(mapping)` for strict column dtype changes,
+  `unique([columns, options])` with subsets and first/last/none/any keep
+  strategies, and `explode(columns [, options])` for list columns
+- `estimated_size()` reports the approximate in-memory byte footprint and
+  `rechunk()` consolidates each column into one chunk
 - `take(indices)` selects rows by 1-based or negative position, while
   `is_duplicated([name])`/`is_unique([name])` append a Boolean marker column
   for repeated or single-occurrence full rows, `null_mask([name])` appends a
@@ -134,17 +137,18 @@ files, read-time column projection, positional column renaming, dtype overrides,
 literal and per-column null markers, UTF-8 lossy decoding,
 skip-rows/row-limit windows, post-header row skipping, CSV/JSON schema-inference
 limits, decimal-comma numbers, CSV date inference and writer quote styles,
-empty-file reads, NaN fill/drop, shift/clip transforms, indexed row take,
+empty-file reads, NaN fill/drop, shift/diff/clip transforms, indexed row take,
 strided row windows, top/bottom k, null masks, forward/backward null fills,
 duplicate and unique markers, writer delimiter/header/null/line-terminator
-options, UTF-8 BOM and decimal-comma output,
+options, UTF-8 BOM, pretty JSON output, and decimal-comma output,
 Parquet column projections, row windows, low-memory and rechunk reads,
 compression codecs, statistics and chunk-size writer options, JSON array/JSON
 Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
-schema, estimated size, head, tail, slice, row indexing, projection, row
-reversal, transpose, sortedness checks, strict casting, subset distinct rows,
-list-column explode, filtering, sorting, grouping, all eager join types,
-column operations, SQL, JSON conversion, and error paths. The smoke test installs the module and bridge
+CSV low-memory reads, schema, estimated size, rechunking, head, tail, slice,
+row indexing, projection, row reversal, transpose, sortedness checks, strict
+casting, subset distinct rows, list-column explode, filtering, sorting with
+null placement, grouping, all eager join types, column operations, SQL, JSON
+conversion, and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
 `POLARS_LUA_LIB`.
 The rockspec check validates the release version references, installs the same
@@ -215,6 +219,7 @@ polars.read_csv(path, {
   skip_rows = 1,
   skip_rows_after_header = 10,
   infer_schema_length = 200,
+  low_memory = true,
   decimal_comma = true,
   n_rows = 100,
 })
@@ -244,6 +249,7 @@ df:shape()                -- rows, cols
 df:schema()               -- { column = "i64", ... }
 df:columns()              -- ordered column names
 df:estimated_size()       -- approximate bytes
+df:rechunk()
 df:is_sorted("score", false)
 df:transpose({ keep_names_as = "field" })
 df:head(n)
@@ -254,6 +260,7 @@ df:take({ -1, -2 })
 df:with_row_index("row_id", 100)
 df:reverse()
 df:shift(1, "score")
+df:diff(1, "score")
 df:clip(0, 100, { "score", "bonus" })
 df:cast({ score = "f64" })
 df:unique("team", { keep = "last" })
@@ -270,6 +277,7 @@ df:sql(query)
 df:select("a", "b")
 df:filter('"a" > 3')
 df:sort("a", true)
+df:sort("a", true, { nulls_last = true })
 df:top_k(5, "score")
 df:bottom_k(5, "score")
 df:group_by("team", { 'sum("score") AS total' })
@@ -297,6 +305,7 @@ df:write_parquet("out.parquet", {
   data_page_size = 65536,
 })
 df:write_json("out.json")
+df:write_json("pretty.json", { pretty = true })
 df:write_json("out.jsonl", { format = "lines" })
 df:to_table()
 df:to_json()

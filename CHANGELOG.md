@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- five DataFrame/IO additions:
+  - `df:diff(periods [, columns])` computes first differences over every
+    numeric column or a validated numeric subset, leaving the first `periods`
+    values null;
+  - `df:sort(columns, descending [, options])` accepts a `nulls_last` option
+    (boolean or per-column list) to place null keys first or last;
+  - `df:rechunk()` returns a copy with one chunk per column while preserving
+    schema, values, and row order;
+  - `polars.read_csv(..., { low_memory = true })` selects Polars' lower-memory
+    CSV reader path and composes with projection, inference, and row windows;
+  - `df:write_json(..., { pretty = true })` writes an indented JSON array;
+    JSON Lines remains unformatted and is rejected with `pretty`;
+- the additive C ABI entry points are `pl_dataframe_diff`,
+  `pl_dataframe_rechunk`, `pl_dataframe_read_csv_low_memory`, and
+  `pl_dataframe_write_json_pretty`; `sort` null placement is built on the
+  existing SQL entry point and every earlier signature and default is
+  unchanged;
+- validation covers non-positive/fractional/non-numeric diff periods,
+  malformed or non-numeric diff subsets, invalid sort option tables and
+  per-column null flags, non-boolean `low_memory`, `pretty` with JSON Lines,
+  non-boolean `pretty`, and closed frames;
+- tests cover integer and float differences at one- and two-row periods,
+  null-first/null-last and per-column sort placement, rechunk data
+  preservation, low-memory CSV reads with projection and row limits, pretty
+  JSON round-trips, and every new error path;
+- `./scripts/test.sh` passes 192 tests; `./scripts/smoke.sh` and
+  `./scripts/rockspec.sh` validate the installed layouts without a version or
+  rockspec change.
+
 ## 0.24.0
 
 - five DataFrame/IO additions:

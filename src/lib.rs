@@ -16,6 +16,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use polars::prelude::*;
+use polars::series::ops::NullBehavior;
 use polars::sql::SQLContext;
 use serde_json::{Map, Value};
 
@@ -62,6 +63,7 @@ struct CsvReadConfig {
     truncate_ragged_lines: bool,
     ignore_errors: bool,
     raise_if_empty: bool,
+    low_memory: bool,
 }
 
 impl Default for CsvReadConfig {
@@ -86,6 +88,7 @@ impl Default for CsvReadConfig {
             truncate_ragged_lines: false,
             ignore_errors: false,
             raise_if_empty: true,
+            low_memory: false,
         }
     }
 }
@@ -667,6 +670,7 @@ fn read_csv_frame(path: &str, config: CsvReadConfig) -> Result<DataFrame, String
         .with_schema_overwrite(schema_overwrite)
         .with_ignore_errors(config.ignore_errors)
         .with_raise_if_empty(config.raise_if_empty)
+        .with_low_memory(config.low_memory)
         .map_parse_options(|options| {
             options
                 .with_separator(config.delimiter)
@@ -1653,6 +1657,81 @@ pub unsafe extern "C" fn pl_dataframe_read_csv_inferred(
     finish_frame(result, err)
 }
 
+/// Reads a CSV file with every earlier reader option plus a memory mode.
+///
+/// The arguments match [`pl_dataframe_read_csv_inferred`] and keep the same
+/// meaning and defaults. `low_memory` is non-zero to select Polars' lower-memory
+/// CSV reader path, which trades speed for a smaller peak footprint. The schema
+/// and values are unchanged. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_read_csv_low_memory(
+    path: *const c_char,
+    delimiter: *const c_char,
+    has_header: i32,
+    quote: *const c_char,
+    comment: *const c_char,
+    columns: *const *const c_char,
+    column_count: u64,
+    dtypes: *const *const c_char,
+    dtype_count: u64,
+    null_values: *const *const c_char,
+    null_value_count: u64,
+    null_columns: *const *const c_char,
+    named_null_values: *const *const c_char,
+    named_null_value_count: u64,
+    skip_rows: u64,
+    skip_rows_after_header: u64,
+    n_rows: i64,
+    rename_columns: *const *const c_char,
+    rename_column_count: u64,
+    encoding: *const c_char,
+    try_parse_dates: i32,
+    decimal_comma: i32,
+    truncate_ragged_lines: i32,
+    ignore_errors: i32,
+    raise_if_empty: i32,
+    infer_schema_length: i64,
+    low_memory: i32,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let path = read_path(path)?;
+        let mut config = csv_read_config_with_window(
+            delimiter,
+            has_header,
+            quote,
+            comment,
+            columns,
+            column_count,
+            dtypes,
+            dtype_count,
+            null_values,
+            null_value_count,
+            skip_rows,
+            n_rows,
+        )?;
+        config.skip_rows_after_header = usize::try_from(skip_rows_after_header)
+            .map_err(|_| "CSV skip_rows_after_header is too large for this platform".to_string())?;
+        config.encoding = read_csv_encoding(encoding)?;
+        config.rename_columns = read_csv_rename_columns(rename_columns, rename_column_count)?;
+        config.named_null_values =
+            read_csv_named_null_values(null_columns, named_null_values, named_null_value_count)?;
+        config.try_parse_dates = try_parse_dates != 0;
+        config.decimal_comma = decimal_comma != 0;
+        config.truncate_ragged_lines = truncate_ragged_lines != 0;
+        config.ignore_errors = ignore_errors != 0;
+        config.raise_if_empty = raise_if_empty != 0;
+        config.low_memory = low_memory != 0;
+        if infer_schema_length >= 0 {
+            config.infer_schema_length = Some(usize::try_from(infer_schema_length).map_err(
+                |_| "CSV infer_schema_length is too large for this platform".to_string(),
+            )?);
+        }
+        read_csv_frame(&path, config)
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_read_parquet(
     path: *const c_char,
@@ -2291,6 +2370,26 @@ pub unsafe extern "C" fn pl_dataframe_reverse(
     finish_frame(result, err)
 }
 
+/// Returns a frame with a single chunk per column.
+///
+/// Polars may store each column in several chunks after a series of
+/// operations. Rechunking consolidates them, which can simplify downstream
+/// access and reduce overhead. The schema, values, and row order are unchanged,
+/// and the input frame is left open. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_rechunk(
+    ptr: *mut PlFrame,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        let mut output = frame.df.clone();
+        output.rechunk_mut_par();
+        Ok(output)
+    }));
+    finish_frame(result, err)
+}
+
 /// Transposes a frame so columns become rows and rows become columns.
 ///
 /// `keep_names_as` is an optional non-empty column name that receives the
@@ -2473,6 +2572,51 @@ pub unsafe extern "C" fn pl_dataframe_clip(
                 .map_err(|error| error.to_string())?;
         }
         Ok(output)
+    }));
+    finish_frame(result, err)
+}
+
+/// Computes the difference between each value and the value `periods` rows
+/// before it.
+///
+/// A null/zero `columns` count targets every primitive numeric column; an
+/// explicit list must name numeric columns. The first `periods` rows are null
+/// because no earlier value exists. Unsigned inputs widen to Int64 through
+/// Polars' diff implementation, while nulls remain null. Column order and the
+/// input frame are preserved. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_diff(
+    ptr: *mut PlFrame,
+    periods: i64,
+    columns: *const *const c_char,
+    column_count: u64,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let frame = frame_ref(ptr)?;
+        if periods < 1 {
+            return Err("diff periods must be a positive integer".to_string());
+        }
+        let requested = read_name_list(columns, column_count, "diff columns")?;
+        let names = numeric_target_columns(&frame.df, &requested, "diff")?;
+        if names.is_empty() {
+            return Ok(frame.df.clone());
+        }
+        let expressions: Vec<Expr> = names
+            .iter()
+            .map(|name| {
+                col(name.as_str())
+                    .diff(lit(periods), NullBehavior::Ignore)
+                    .alias(name.as_str())
+            })
+            .collect();
+        frame
+            .df
+            .clone()
+            .lazy()
+            .with_columns(expressions)
+            .collect()
+            .map_err(|error| error.to_string())
     }));
     finish_frame(result, err)
 }
@@ -3684,6 +3828,36 @@ pub unsafe extern "C" fn pl_dataframe_write_json(
             })
             .finish(&mut df)
             .map_err(|error| error.to_string())
+    }));
+    finish_write_with(result, err, "write_json")
+}
+
+/// Writes a pretty-printed JSON array.
+///
+/// JSON Lines is not supported by this entry point because pretty-printing a
+/// stream would break the one-object-per-line format; a non-zero `json_lines`
+/// is an error. Array output is parsed and re-serialized with indentation, so
+/// it is valid JSON with the same values as [`pl_dataframe_write_json`]. The
+/// function returns zero on success. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_json_pretty(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    json_lines: i32,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        if json_lines != 0 {
+            return Err("pretty write_json supports only the array format".to_string());
+        }
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let json = to_json_string(&frame.df, JsonFormat::Json)?;
+        let value: Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let pretty =
+            serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+        std::fs::write(path, pretty).map_err(|error| error.to_string())
     }));
     finish_write_with(result, err, "write_json")
 }

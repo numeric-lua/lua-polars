@@ -4026,6 +4026,216 @@ test("read_parquet rechunk preserves results", function()
   df:close()
 end)
 
+test("diff computes first and wider differences", function()
+  local df = polars.read_csv(fixture)
+  local first = df:diff(1, "score")
+  eq(first:shape(), df:shape())
+  eq(table.concat(first:columns(), ","), "name,team,score,active")
+  eq(first:schema().score, "i64")
+  local rows = first:to_table()
+  eq(rows[1].score, polars.null)
+  eq(rows[2].score, -3)
+  eq(rows[3].score, 5)
+  eq(rows[4].score, -7)
+  eq(rows[5].score, 4)
+  first:close()
+
+  local wider = df:diff(2)
+  rows = wider:to_table()
+  eq(rows[1].name, "ana")
+  eq(rows[1].score, polars.null)
+  eq(rows[2].score, polars.null)
+  eq(rows[3].score, 2)
+  eq(rows[4].score, -2)
+  eq(rows[5].score, -3)
+  wider:close()
+
+  local floats = df:sql([[
+    SELECT "score", CAST("score" AS DOUBLE) AS "f" FROM df
+  ]])
+  local float_diff = floats:diff(1, "f")
+  eq(float_diff:schema().f, "f64")
+  eq(float_diff:to_table()[1].f, polars.null)
+  eq(float_diff:to_table()[2].f, -3)
+  float_diff:close()
+  floats:close()
+  eq(df:to_table()[1].score, 10, "diff changed the input frame")
+  df:close()
+end)
+
+test("diff rejects invalid periods and subsets", function()
+  local df = polars.read_csv(fixture)
+  for _, value in ipairs({ 0, -1, 1.5, "1", true, {}, math.huge,
+      9007199254740992 }) do
+    local ok, err = pcall(function() df:diff(value, "score") end)
+    eq(ok, false, "invalid diff period accepted")
+    truthy(tostring(err):find("positive integer", 1, true),
+      "diff period error: " .. tostring(err))
+  end
+  local subset_cases = {
+    { 42, "columns must be a column name or a list of names" },
+    { {}, "columns must not be empty" },
+    { { [1] = "score", [3] = "active" }, "contiguous list" },
+    { { "score", "score" }, "duplicate diff column 'score'" },
+    { { "missing" }, "is not a column in the DataFrame" },
+    { { "name" }, "expected a numeric column" },
+  }
+  for _, case in ipairs(subset_cases) do
+    local ok, err = pcall(function() df:diff(1, case[1]) end)
+    eq(ok, false, "invalid diff subset accepted")
+    truthy(tostring(err):find(case[2], 1, true),
+      "expected '" .. case[2] .. "' in: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:diff(1) end)
+  eq(ok, false, "closed diff accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed diff error")
+end)
+
+test("sort controls null placement", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("id,team,score\n1,a,\n2,a,5\n3,b,9\n4,b,\n")
+  file:close()
+  local df = polars.read_csv(path)
+  local last = df:sort("score", false, { nulls_last = true })
+  local rows = last:to_table()
+  eq(rows[1].id, 2)
+  eq(rows[2].id, 3)
+  eq(rows[3].id, 1)
+  eq(rows[4].id, 4)
+  last:close()
+
+  local first = df:sort("score", false, { nulls_last = false })
+  rows = first:to_table()
+  eq(rows[1].score, polars.null)
+  eq(rows[2].score, polars.null)
+  eq(rows[3].score, 5)
+  eq(rows[4].score, 9)
+  first:close()
+
+  local keyed = df:sort({ "team", "score" }, { false, false },
+    { nulls_last = { true, true } })
+  rows = keyed:to_table()
+  eq(rows[1].id, 2)
+  eq(rows[2].id, 1)
+  eq(rows[3].id, 3)
+  eq(rows[4].id, 4)
+  keyed:close()
+  df:close()
+end)
+
+test("sort rejects invalid null options", function()
+  local df = polars.read_csv(fixture)
+  local ok, err = pcall(function() df:sort("score", false, 42) end)
+  eq(ok, false, "non-table sort options accepted")
+  truthy(tostring(err):find("options must be a table", 1, true),
+    "sort options error: " .. tostring(err))
+  ok, err = pcall(function()
+    df:sort("score", false, { nulls = true })
+  end)
+  eq(ok, false, "unknown sort option accepted")
+  truthy(tostring(err):find("unknown field", 1, true),
+    "sort unknown option error: " .. tostring(err))
+  ok, err = pcall(function()
+    df:sort("score", false, { nulls_last = "last" })
+  end)
+  eq(ok, false, "non-boolean nulls_last accepted")
+  truthy(tostring(err):find("nulls_last must be", 1, true),
+    "nulls_last type error: " .. tostring(err))
+  ok, err = pcall(function()
+    df:sort({ "team", "score" }, { false, false }, { nulls_last = { true } })
+  end)
+  eq(ok, false, "short nulls_last list accepted")
+  truthy(tostring(err):find("match the column count", 1, true),
+    "nulls_last count error: " .. tostring(err))
+  ok, err = pcall(function()
+    df:sort({ "team", "score" }, { false, false },
+      { nulls_last = { true, 1 } })
+  end)
+  eq(ok, false, "non-boolean nulls_last entry accepted")
+  truthy(tostring(err):find("entries must be booleans", 1, true),
+    "nulls_last entry error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:sort("score", false) end)
+  eq(ok, false, "closed sort accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed sort error")
+end)
+
+test("rechunk preserves data and returns a new frame", function()
+  local df = polars.read_csv(fixture)
+  local rechunked = df:rechunk()
+  eq(rechunked:shape(), df:shape())
+  eq(table.concat(rechunked:columns(), ","),
+    table.concat(df:columns(), ","))
+  eq(rechunked:schema().score, df:schema().score)
+  eq(rechunked:to_table()[1].name, "ana")
+  eq(rechunked:to_table()[5].score, 9)
+  eq(df:to_table()[1].name, "ana", "rechunk changed the input frame")
+  rechunked:close()
+  df:close()
+  local ok, err = pcall(function() df:rechunk() end)
+  eq(ok, false, "closed rechunk accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed rechunk error")
+end)
+
+test("read_csv low_memory preserves results", function()
+  local df = polars.read_csv(fixture)
+  local low = polars.read_csv(fixture, { low_memory = true })
+  eq(low:shape(), df:shape())
+  eq(table.concat(low:columns(), ","), table.concat(df:columns(), ","))
+  eq(low:schema().score, df:schema().score)
+  eq(low:to_table()[1].name, df:to_table()[1].name)
+  low:close()
+
+  local combined = polars.read_csv(fixture, {
+    low_memory = true,
+    columns = { "score", "name" },
+    n_rows = 2,
+  })
+  eq(combined:shape(), 2)
+  eq(table.concat(combined:columns(), ","), "score,name")
+  eq(combined:to_table()[1].score, 10)
+  combined:close()
+  df:close()
+
+  local ok, err = pcall(polars.read_csv, fixture, { low_memory = "true" })
+  eq(ok, false, "non-boolean read_csv low_memory accepted")
+  truthy(tostring(err):find("low_memory", 1, true),
+    "read_csv low_memory error: " .. tostring(err))
+end)
+
+test("write_json pretty writes an indented array", function()
+  local df = polars.read_csv(roundtrip_fixture)
+  local out = new_temp_path(".json")
+  eq(df:write_json(out, { pretty = true }), df, "pretty write_json return")
+  local raw = read_file(out)
+  eq(raw:sub(1, 1), "[")
+  truthy(raw:find("\n", 1, true), "pretty JSON has no newlines")
+  truthy(raw:find('"id": 1', 1, true) or raw:find('"id":1', 1, true),
+    "pretty JSON is missing an indented id")
+  local loaded = polars.read_json(out)
+  eq(loaded:shape(), 3)
+  eq(loaded:to_table()[1].name, "ana")
+  loaded:close()
+
+  local ok, err = pcall(function()
+    df:write_json(out, { pretty = true, format = "lines" })
+  end)
+  eq(ok, false, "pretty JSON Lines accepted")
+  truthy(tostring(err):find("array format", 1, true),
+    "pretty lines error: " .. tostring(err))
+  ok, err = pcall(function() df:write_json(out, { pretty = "yes" }) end)
+  eq(ok, false, "non-boolean pretty accepted")
+  truthy(tostring(err):find("pretty must be a boolean", 1, true),
+    "pretty type error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:write_json(out, { pretty = true }) end)
+  eq(ok, false, "closed pretty write_json accepted")
+  truthy(tostring(err):find("closed", 1, true),
+    "closed pretty write_json error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

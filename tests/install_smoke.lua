@@ -67,6 +67,14 @@ local clipped = row_tools:clip(7, 10)
 check(clipped:to_table()[3].score == 10, "unexpected clipped value")
 check(clipped:to_table()[4].score == 7, "unexpected clipped lower bound")
 clipped:close()
+local differences = row_tools:diff(1, "score")
+check(differences:to_table()[1].score == polars.null,
+  "diff did not leave a leading null")
+check(differences:to_table()[2].score == -3, "unexpected diff value")
+differences:close()
+local compact = row_tools:rechunk()
+check(compact:shape() == row_tools:shape(), "rechunk changed the shape")
+compact:close()
 local duplicated = row_tools:is_duplicated()
 check(duplicated:columns()[5] == "duplicated",
   "duplicate marker was not appended")
@@ -96,6 +104,10 @@ check(row_tools:is_sorted("name"), "sorted names were not detected")
 local sorted_rows = row_tools:sort("score", false)
 check(sorted_rows:is_sorted("score"), "sorted scores were not detected")
 sorted_rows:close()
+local null_placed = row_tools:sort("score", false, { nulls_last = true })
+check(null_placed:shape() == row_tools:shape(),
+  "null-placed sort changed the shape")
+null_placed:close()
 local numeric = row_tools:sql('SELECT "score" FROM df')
 local transposed = numeric:transpose()
 local transpose_rows, transpose_cols = transposed:shape()
@@ -164,6 +176,16 @@ check(empty:shape() == 0 and #empty:columns() == 0,
   "unexpected empty CSV frame")
 empty:close()
 os.remove(empty_path)
+
+local low_memory_csv = polars.read_csv(fixture, {
+  low_memory = true,
+  columns = { "score", "name" },
+  n_rows = 2,
+})
+check(low_memory_csv:shape() == 2, "unexpected low-memory CSV shape")
+check(low_memory_csv:to_table()[1].score == 10,
+  "unexpected low-memory CSV value")
+low_memory_csv:close()
 
 local projected = polars.read_csv(fixture, { columns = { "score", "name" } })
 local projected_rows, projected_cols = projected:shape()
@@ -437,6 +459,19 @@ check(json_lines_string:sub(1, 1) == "{",
 local json_array_string = writer:to_json()
 check(json_array_string:sub(1, 1) == "[",
   "default to_json output does not start with an array")
+local pretty_json = os.tmpname()
+os.remove(pretty_json)
+writer:write_json(pretty_json, { pretty = true })
+local pretty_handle = assert(io.open(pretty_json, "rb"))
+local pretty_raw = pretty_handle:read("*a")
+pretty_handle:close()
+check(pretty_raw:sub(1, 1) == "[", "pretty JSON is not an array")
+check(pretty_raw:find("\n", 1, true) ~= nil,
+  "pretty JSON has no line breaks")
+local pretty_loaded = polars.read_json(pretty_json)
+check(pretty_loaded:shape() == 3, "unexpected pretty JSON round-trip shape")
+pretty_loaded:close()
+os.remove(pretty_json)
 os.remove(json_out)
 
 local lenient_json = os.tmpname()

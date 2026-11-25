@@ -129,6 +129,20 @@ PlFrame *pl_dataframe_read_csv_inferred(
     int32_t decimal_comma, int32_t truncate_ragged_lines,
     int32_t ignore_errors, int32_t raise_if_empty,
     int64_t infer_schema_length, char **err);
+PlFrame *pl_dataframe_read_csv_low_memory(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, uint64_t skip_rows_after_header, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t decimal_comma, int32_t truncate_ragged_lines,
+    int32_t ignore_errors, int32_t raise_if_empty,
+    int64_t infer_schema_length, int32_t low_memory, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -168,6 +182,7 @@ PlFrame *pl_dataframe_slice(
 PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_rechunk(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_transpose(
     PlFrame *frame, const char *keep_names_as, char **err);
 PlFrame *pl_dataframe_shift(
@@ -175,6 +190,9 @@ PlFrame *pl_dataframe_shift(
     uint64_t column_count, char **err);
 PlFrame *pl_dataframe_clip(
     PlFrame *frame, double minimum, double maximum, const char *const *columns,
+    uint64_t column_count, char **err);
+PlFrame *pl_dataframe_diff(
+    PlFrame *frame, int64_t periods, const char *const *columns,
     uint64_t column_count, char **err);
 PlFrame *pl_dataframe_gather_every(
     PlFrame *frame, uint64_t n, uint64_t offset, char **err);
@@ -241,6 +259,8 @@ int pl_dataframe_write_parquet_options(
     int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
     char **err);
 int pl_dataframe_write_json(
+    PlFrame *frame, const char *path, int32_t json_lines, char **err);
+int pl_dataframe_write_json_pretty(
     PlFrame *frame, const char *path, int32_t json_lines, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 char *pl_dataframe_to_json_format(
@@ -462,6 +482,13 @@ end
 function DataFrame:reverse()
   local err = ffi.new("char *[1]")
   local pointer = lib.pl_dataframe_reverse(self:_require_open(), err)
+  return new_frame(pointer, err)
+end
+
+-- Returns a copy with one chunk per column; the schema and values are unchanged.
+function DataFrame:rechunk()
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_rechunk(self:_require_open(), err)
   return new_frame(pointer, err)
 end
 
@@ -1228,6 +1255,30 @@ function DataFrame:clip(minimum, maximum, columns)
   return new_frame(pointer, err)
 end
 
+-- First differences: each numeric value minus the value `periods` rows before
+-- it. The first `periods` rows become null. Without columns every numeric
+-- column participates; an explicit subset must name numeric columns.
+function DataFrame:diff(periods, columns)
+  if type(periods) ~= "number" or periods < 1 or periods % 1 ~= 0 or
+      periods > MAX_SAFE_INTEGER then
+    error("diff periods must be a positive integer", 2)
+  end
+  local selected = subset_columns(self, columns, "diff")
+  local names
+  local count = 0
+  if selected ~= nil then
+    count = #selected
+    names = ffi.new("const char *[?]", count)
+    for index, name in ipairs(selected) do
+      names[index - 1] = name
+    end
+  end
+  local err = ffi.new("char *[1]")
+  local pointer = lib.pl_dataframe_diff(self:_require_open(), periods, names,
+    count, err)
+  return new_frame(pointer, err)
+end
+
 -- Positive n keeps rows offset, offset+n, offset+2n, and so on. offset
 -- defaults to 0 and is a zero-based row index; an offset past the end returns
 -- an empty frame with the same schema.
@@ -1450,6 +1501,7 @@ end
 
 local JSON_WRITE_OPTION_KEYS = {
   format = true,
+  pretty = true,
 }
 
 function DataFrame:write_json(path, options)
@@ -1457,6 +1509,7 @@ function DataFrame:write_json(path, options)
     error("write_json path must be a string", 2)
   end
   local format = "array"
+  local pretty = false
   if options ~= nil then
     if type(options) ~= "table" then
       error("write_json options must be a table", 2)
@@ -1467,10 +1520,26 @@ function DataFrame:write_json(path, options)
       end
     end
     format = json_format(options.format, "write_json")
+    pretty = options.pretty
+    if pretty == nil then
+      pretty = false
+    end
+    if type(pretty) ~= "boolean" then
+      error("write_json pretty must be a boolean", 2)
+    end
+  end
+  if pretty and format == "lines" then
+    error("write_json pretty supports only the array format", 2)
   end
   local err = ffi.new("char *[1]")
-  local status = lib.pl_dataframe_write_json(self:_require_open(), path,
-    format == "lines" and 1 or 0, err)
+  local status
+  if pretty then
+    status = lib.pl_dataframe_write_json_pretty(self:_require_open(), path, 0,
+      err)
+  else
+    status = lib.pl_dataframe_write_json(self:_require_open(), path,
+      format == "lines" and 1 or 0, err)
+  end
   if status ~= 0 then
     error(take_error(err), 2)
   end
@@ -1579,15 +1648,50 @@ function DataFrame:filter(condition)
   return self:sql("SELECT * FROM df WHERE " .. condition)
 end
 
-function DataFrame:sort(columns, descending)
+function DataFrame:sort(columns, descending, options)
   columns = as_list(columns, "sort columns")
+  local nulls_last
+  if options ~= nil then
+    if type(options) ~= "table" then
+      error("sort options must be a table", 2)
+    end
+    for key in pairs(options) do
+      if key ~= "nulls_last" then
+        error("sort options: unknown field '" .. tostring(key) .. "'", 2)
+      end
+    end
+    nulls_last = options.nulls_last
+    if nulls_last ~= nil and type(nulls_last) ~= "boolean" and
+        type(nulls_last) ~= "table" then
+      error("sort nulls_last must be a boolean or a list of booleans", 2)
+    end
+    if type(nulls_last) == "table" then
+      if #nulls_last ~= #columns then
+        error("sort nulls_last list must match the column count", 2)
+      end
+      for index = 1, #columns do
+        if type(nulls_last[index]) ~= "boolean" then
+          error("sort nulls_last entries must be booleans", 2)
+        end
+      end
+    end
+  end
   local quoted = {}
   for index, name in ipairs(columns) do
     local direction = descending
     if type(descending) == "table" then
       direction = descending[index]
     end
-    quoted[index] = quote_identifier(name) .. (direction and " DESC" or " ASC")
+    local suffix = ""
+    if nulls_last ~= nil then
+      local value = nulls_last
+      if type(nulls_last) == "table" then
+        value = nulls_last[index]
+      end
+      suffix = value and " NULLS LAST" or " NULLS FIRST"
+    end
+    quoted[index] = quote_identifier(name) .. (direction and " DESC" or " ASC") ..
+      suffix
   end
   return self:sql("SELECT * FROM df ORDER BY " .. table.concat(quoted, ", "))
 end
@@ -1803,6 +1907,7 @@ local CSV_OPTION_KEYS = {
   ignore_errors = true,
   raise_if_empty = true,
   infer_schema_length = true,
+  low_memory = true,
 }
 
 local function csv_byte_option(options, key, default)
@@ -2146,7 +2251,7 @@ end
 local function csv_options(options)
   if options == nil then
     return ",", true, '"', "", nil, nil, 0, nil, 0, 0, -1, false, nil, nil,
-      nil, nil, false, false, false, 0, false, true, nil
+      nil, nil, false, false, false, 0, false, true, nil, false
   end
   if type(options) ~= "table" then
     error("read_csv options must be a table", 3)
@@ -2183,11 +2288,13 @@ local function csv_options(options)
   local decimal_comma = csv_boolean_option(options, "decimal_comma")
   local raise_if_empty = csv_raise_if_empty(options)
   local infer_schema_length = csv_infer_schema_length(options)
+  local low_memory = csv_boolean_option(options, "low_memory")
   return delimiter, header, quote, comment, columns, dtypes, dtype_count,
     null_values, null_value_count, skip_rows, n_rows, window_requested,
     rename_columns, encoding, named_null_columns, named_null_values,
     try_parse_dates, truncate_ragged_lines, ignore_errors,
-    skip_rows_after_header, decimal_comma, raise_if_empty, infer_schema_length
+    skip_rows_after_header, decimal_comma, raise_if_empty, infer_schema_length,
+    low_memory
 end
 
 function polars.read_csv(path, options)
@@ -2199,7 +2306,7 @@ function polars.read_csv(path, options)
     rename_columns, encoding, named_null_columns, named_null_values,
     try_parse_dates, truncate_ragged_lines, ignore_errors,
     skip_rows_after_header, decimal_comma, raise_if_empty,
-    infer_schema_length = csv_options(options)
+    infer_schema_length, low_memory = csv_options(options)
   local err = ffi.new("char *[1]")
   local names
   if columns ~= nil then
@@ -2240,7 +2347,17 @@ function polars.read_csv(path, options)
     end
   end
   local pointer
-  if infer_schema_length ~= nil then
+  if low_memory then
+    pointer = lib.pl_dataframe_read_csv_low_memory(path, delimiter,
+      header and 1 or 0, quote, comment, names, names and #columns or 0,
+      dtype_pairs, dtype_count, markers, null_value_count, named_columns,
+      named_markers, named_null_columns and #named_null_columns or 0,
+      skip_rows, skip_rows_after_header, n_rows, renames,
+      rename_columns and #rename_columns or 0, encoding,
+      try_parse_dates and 1 or 0, decimal_comma and 1 or 0,
+      truncate_ragged_lines and 1 or 0, ignore_errors and 1 or 0,
+      raise_if_empty and 1 or 0, infer_schema_length or -1, 1, err)
+  elseif infer_schema_length ~= nil then
     pointer = lib.pl_dataframe_read_csv_inferred(path, delimiter,
       header and 1 or 0, quote, comment, names, names and #columns or 0,
       dtype_pairs, dtype_count, markers, null_value_count, named_columns,

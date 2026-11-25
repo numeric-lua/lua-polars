@@ -97,6 +97,10 @@ Polars' default.
   nulls in only the failed column; use a matching dtype override and
   `null_values` policy to make the recovery explicit. Both lenient options are
   rejected when non-boolean.
+- `low_memory`: a boolean, default `false`. `true` selects Polars' lower-memory
+  CSV reader path, trading read speed for a smaller peak footprint. It composes
+  with projection, dtype overrides, inference, and the row window without
+  changing the schema or values.
 - `dtypes`: a table mapping column names to dtype names, applied by name at
   read time instead of relying on inference. Supported dtypes are `bool` /
   `boolean`, `i32`, `i64`, `u32`, `u64`, `f32`, `f64`, and `str` / `string` /
@@ -280,6 +284,16 @@ frame. Calling it on a closed frame is an error.
 local bytes = df:estimated_size()
 ```
 
+### `df:rechunk() -> DataFrame`
+
+Returns a new frame with a single chunk per column. The schema, values, and row
+order are unchanged, and the input frame stays open. Calling it on a closed
+frame is an error.
+
+```lua
+local compact = df:rechunk()
+```
+
 ### `df:schema() -> table`
 
 Maps column names to Polars dtype names, e.g. `{ score = "i64" }`. The order
@@ -395,6 +409,24 @@ local paired = df:shift(2, { "score", "bonus" })
 
 Non-integer, non-numeric, or above-`2^53 - 1` periods, malformed, duplicate,
 empty, or unknown column subsets, and closed frames are errors.
+
+### `df:diff(periods [, columns]) -> DataFrame`
+
+Computes each numeric value minus the value `periods` rows before it. The first
+`periods` rows are null because no earlier value exists. With no `columns`
+every primitive numeric column participates; a single name or a non-empty
+contiguous list restricts the operation and must name numeric columns.
+Unsigned inputs widen to `i64` through Polars' diff implementation, while nulls
+stay null. Column order and the input frame are preserved.
+
+```lua
+local changes = df:diff(1, "score")
+local wider = df:diff(2)
+```
+
+Zero, negative, fractional, non-numeric, or above-`2^53 - 1` periods,
+malformed, duplicate, empty, unknown, or non-numeric column subsets, and closed
+frames are errors.
 
 ### `df:clip(min, max [, columns]) -> DataFrame`
 
@@ -663,10 +695,22 @@ df:filter('"score" >= 9 AND "active" = true')
 
 The condition is SQL, not a Lua expression; only pass trusted strings.
 
-### `df:sort(columns, descending) -> DataFrame`
+### `df:sort(columns, descending [, options]) -> DataFrame`
 
 `columns` is a name or list. `descending` is a boolean or a per-column list of
-booleans.
+booleans. `options` may set `nulls_last` to a boolean or a per-column list of
+booleans; `true` writes `NULLS LAST`, `false` writes `NULLS FIRST`, and omitting
+the option keeps the previous SQL ordering exactly.
+
+```lua
+local ordered = df:sort("score", false, { nulls_last = true })
+local keyed = df:sort({ "team", "score" }, { false, false },
+  { nulls_last = { true, true } })
+```
+
+A non-table options argument, unknown option keys, a `nulls_last` list whose
+length differs from the column count, non-boolean `nulls_last` entries, and
+closed frames are errors.
 
 ### `df:is_sorted(columns [, descending [, nulls_last]]) -> boolean`
 
@@ -884,14 +928,19 @@ truncated. With no options it writes one JSON array of row objects, matching
   case-insensitively. JSON Lines writes one object per line and is not valid
   JSON as a whole, so read it back with `format = "lines"`. Other values are
   errors.
+- `pretty`: a boolean, default `false`. `true` writes a pretty-printed JSON
+  array with the same values as the compact form. Pretty output is not
+  available for `format = "lines"` because indentation would break the
+  one-object-per-line contract.
 
 ```lua
 df:write_json("rows.json")
+df:write_json("pretty.json", { pretty = true })
 df:write_json("rows.jsonl", { format = "lines" })
 ```
 
-Unknown option keys and invalid types are errors, as are closed frames,
-non-string or empty paths, and write failures.
+Unknown option keys and invalid types are errors, as are `pretty` with JSON
+Lines, closed frames, non-string or empty paths, and write failures.
 
 ### `df:write_parquet(path [, options]) -> DataFrame`
 
@@ -1075,6 +1124,20 @@ PlFrame *pl_dataframe_read_csv_inferred(
     int32_t decimal_comma, int32_t truncate_ragged_lines,
     int32_t ignore_errors, int32_t raise_if_empty,
     int64_t infer_schema_length, char **err);
+PlFrame *pl_dataframe_read_csv_low_memory(
+    const char *path, const char *delimiter, int32_t has_header,
+    const char *quote, const char *comment,
+    const char *const *columns, uint64_t column_count,
+    const char *const *dtypes, uint64_t dtype_count,
+    const char *const *null_values, uint64_t null_value_count,
+    const char *const *null_columns, const char *const *named_null_values,
+    uint64_t named_null_value_count,
+    uint64_t skip_rows, uint64_t skip_rows_after_header, int64_t n_rows,
+    const char *const *rename_columns, uint64_t rename_column_count,
+    const char *encoding, int32_t try_parse_dates,
+    int32_t decimal_comma, int32_t truncate_ragged_lines,
+    int32_t ignore_errors, int32_t raise_if_empty,
+    int64_t infer_schema_length, int32_t low_memory, char **err);
 PlFrame *pl_dataframe_read_parquet(const char *path, char **err);
 PlFrame *pl_dataframe_read_parquet_options(
     const char *path, const char *const *columns, uint64_t column_count,
@@ -1114,6 +1177,7 @@ PlFrame *pl_dataframe_slice(
 PlFrame *pl_dataframe_with_row_index(
     PlFrame *frame, const char *name, uint64_t offset, char **err);
 PlFrame *pl_dataframe_reverse(PlFrame *frame, char **err);
+PlFrame *pl_dataframe_rechunk(PlFrame *frame, char **err);
 PlFrame *pl_dataframe_transpose(
     PlFrame *frame, const char *keep_names_as, char **err);
 PlFrame *pl_dataframe_shift(
@@ -1121,6 +1185,9 @@ PlFrame *pl_dataframe_shift(
     uint64_t column_count, char **err);
 PlFrame *pl_dataframe_clip(
     PlFrame *frame, double minimum, double maximum, const char *const *columns,
+    uint64_t column_count, char **err);
+PlFrame *pl_dataframe_diff(
+    PlFrame *frame, int64_t periods, const char *const *columns,
     uint64_t column_count, char **err);
 PlFrame *pl_dataframe_gather_every(
     PlFrame *frame, uint64_t n, uint64_t offset, char **err);
@@ -1188,6 +1255,8 @@ int pl_dataframe_write_parquet_options(
     char **err);
 int pl_dataframe_write_json(
     PlFrame *frame, const char *path, int32_t json_lines, char **err);
+int pl_dataframe_write_json_pretty(
+    PlFrame *frame, const char *path, int32_t json_lines, char **err);
 char *pl_dataframe_to_json(PlFrame *frame, char **err);
 char *pl_dataframe_to_json_format(
     PlFrame *frame, int32_t json_lines, char **err);
@@ -1221,21 +1290,29 @@ so malformed content still fails. Earlier reader entry points keep
 argument is a `usize` after conversion, so an out-of-range value is an error.
 Explicit `dtypes` overrides still take precedence.
 
+`pl_dataframe_read_csv_low_memory` is additive and carries every argument from
+`pl_dataframe_read_csv_inferred` plus `int32_t low_memory`. Non-zero selects
+Polars' lower-memory CSV reader path; the schema and values are unchanged.
+
 `pl_dataframe_estimated_size` writes Polars' approximate in-memory byte count to
 `uint64_t *bytes` and returns zero on success. `pl_dataframe_is_sorted` checks
 one or more keys with a parallel descending-flag array and a single
 `nulls_last` flag, writing the Boolean result to `int32_t *out`.
 
 `pl_dataframe_reverse` returns a newly owned frame with the same columns and
-reversed row order. `pl_dataframe_transpose` swaps rows and columns, optionally
-naming the output column that receives the original column names; Polars casts
-all values to a common supertype. `pl_dataframe_shift` borrows an optional
-column list; a
+reversed row order. `pl_dataframe_rechunk` returns a copy consolidated into
+single-chunk columns. `pl_dataframe_transpose` swaps rows and columns,
+optionally naming the output column that receives the original column names;
+Polars casts all values to a common supertype. `pl_dataframe_shift` borrows an
+optional column list; a
 null/zero count shifts every column, a positive `periods` inserts leading nulls,
 and a negative value inserts trailing nulls. `pl_dataframe_clip` clamps every
 numeric column (or only the borrowed explicit list) to the inclusive
 `[minimum, maximum]` range, preserves nulls, and rejects non-integral bounds on
-integer columns. `pl_dataframe_gather_every` returns rows `offset`, `offset+n`,
+integer columns. `pl_dataframe_diff` computes the difference against the value
+`periods` rows earlier for every numeric column or a borrowed numeric subset;
+the first `periods` rows are null. `pl_dataframe_gather_every` returns rows
+`offset`, `offset+n`,
 and so on, with a positive `n` and a non-negative zero-based offset.
 `pl_dataframe_take` resolves a borrowed array of signed indexes: negative
 values count from the end and every position must be in bounds. Order and
@@ -1414,6 +1491,10 @@ column, while empty and duplicate names are errors. The returned frame keeps
 the requested order. `pl_dataframe_write_json` writes the same two formats from
 an open frame and returns zero on success or non-zero with `err` set on
 failure.
+
+`pl_dataframe_write_json_pretty` writes an indented JSON array and returns zero
+on success. A non-zero `json_lines` is rejected because pretty JSON Lines would
+break the one-object-per-line format.
 
 `pl_dataframe_read_json_inferred` is additive and carries every argument from
 `pl_dataframe_read_json` plus `int64_t infer_schema_length`. For JSON Lines,
