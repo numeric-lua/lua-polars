@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::Arc;
 
+use polars::polars_utils::compression::{BrotliLevel, GzipLevel, ZstdLevel};
 use polars::prelude::*;
 use polars::series::ops::NullBehavior;
 use polars::sql::SQLContext;
@@ -3962,6 +3963,46 @@ fn parse_parquet_compression(value: Option<&str>) -> Result<ParquetCompression, 
     }
 }
 
+/// Parses a codec name plus an optional compression level.
+///
+/// A negative level keeps the codec default. Levels apply to zstd (1..=22),
+/// gzip (0..=9), and brotli (0..=11); other codecs reject an explicit level.
+fn parse_parquet_compression_level(
+    value: Option<&str>,
+    level: i64,
+) -> Result<ParquetCompression, String> {
+    let value = value.unwrap_or("zstd");
+    if level < 0 {
+        return parse_parquet_compression(Some(value));
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "" | "zstd" => {
+            let level = i32::try_from(level)
+                .map_err(|_| "Parquet zstd compression_level is too large".to_string())?;
+            let level = ZstdLevel::try_new(level).map_err(|error| error.to_string())?;
+            Ok(ParquetCompression::Zstd(Some(level)))
+        },
+        "gzip" => {
+            let level = u8::try_from(level)
+                .map_err(|_| "Parquet gzip compression_level is too large".to_string())?;
+            let level = GzipLevel::try_new(level).map_err(|error| error.to_string())?;
+            Ok(ParquetCompression::Gzip(Some(level)))
+        },
+        "brotli" => {
+            let level = u32::try_from(level)
+                .map_err(|_| "Parquet brotli compression_level is too large".to_string())?;
+            let level = BrotliLevel::try_new(level).map_err(|error| error.to_string())?;
+            Ok(ParquetCompression::Brotli(Some(level)))
+        },
+        "snappy" | "lz4" | "lz4-raw" | "uncompressed" | "none" => Err(format!(
+            "compression_level is not supported for Parquet codec '{value}'"
+        )),
+        other => Err(format!(
+            "unsupported Parquet compression '{other}'; expected zstd, snappy, gzip, brotli, lz4, or uncompressed"
+        )),
+    }
+}
+
 /// Converts an optional positive ABI size into `Option<usize>`.
 ///
 /// Zero means "use the Polars default". Any non-zero value must fit in
@@ -4061,6 +4102,49 @@ pub unsafe extern "C" fn pl_dataframe_write_parquet_options(
         };
         let config = ParquetWriteConfig {
             compression: parse_parquet_compression(compression_name.as_deref())?,
+            statistics: if statistics == 0 {
+                StatisticsOptions::empty()
+            } else {
+                StatisticsOptions::default()
+            },
+            row_group_size: optional_parquet_size(row_group_size, "Parquet row_group_size")?,
+            data_page_size: optional_parquet_size(data_page_size, "Parquet data_page_size")?,
+        };
+        write_parquet_frame(&frame.df, &path, config)
+    }));
+    finish_write_with(result, err, "write_parquet")
+}
+
+/// Writes a Parquet file with an explicit compression level.
+///
+/// The arguments match [`pl_dataframe_write_parquet_options`] plus
+/// `compression_level`. A negative level keeps the codec default; zstd, gzip,
+/// and brotli accept their codec-specific ranges, while other codecs reject an
+/// explicit level. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_write_parquet_leveled(
+    ptr: *mut PlFrame,
+    path: *const c_char,
+    compression: *const c_char,
+    statistics: i32,
+    row_group_size: u64,
+    data_page_size: u64,
+    compression_level: i64,
+    err: *mut *mut c_char,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        let frame = frame_ref(ptr)?;
+        let path = read_path(path)?;
+        let compression_name = if compression.is_null() {
+            None
+        } else {
+            Some(read_utf8(compression, "compression")?)
+        };
+        let config = ParquetWriteConfig {
+            compression: parse_parquet_compression_level(
+                compression_name.as_deref(),
+                compression_level,
+            )?,
             statistics: if statistics == 0 {
                 StatisticsOptions::empty()
             } else {

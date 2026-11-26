@@ -98,6 +98,11 @@ check(row_tools:quantile("score", 0.5) == 9, "unexpected quantile")
 check(row_tools:var("score") == 7.3, "unexpected variance")
 check(math.abs(row_tools:std("score") - 2.7018512172213) < 1e-9,
   "unexpected standard deviation")
+check(row_tools:n_unique() == 5, "unexpected distinct row count")
+check(row_tools:n_unique("team") == 2, "unexpected distinct team count")
+check(row_tools:first("name") == "ana", "unexpected first value")
+check(row_tools:last("name") == "eva", "unexpected last value")
+check(row_tools:corr("score", "score") == 1, "unexpected correlation")
 local duplicated = row_tools:is_duplicated()
 check(duplicated:columns()[5] == "duplicated",
   "duplicate marker was not appended")
@@ -580,6 +585,13 @@ check(rechunked:shape() == 3, "unexpected rechunked Parquet shape")
 check(rechunked:to_table()[3].note == polars.null,
   "unexpected rechunked Parquet null")
 rechunked:close()
+writer:write_parquet(parquet_out, {
+  compression = "zstd",
+  compression_level = 3,
+})
+local leveled = polars.read_parquet(parquet_out)
+check(leveled:shape() == 3, "unexpected leveled Parquet shape")
+leveled:close()
 local bad_compression = pcall(function()
   writer:write_parquet(parquet_out, { compression = "lzo" })
 end)

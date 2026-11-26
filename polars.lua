@@ -272,6 +272,10 @@ int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
     int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
     char **err);
+int pl_dataframe_write_parquet_leveled(
+    PlFrame *frame, const char *path, const char *compression,
+    int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
+    int64_t compression_level, char **err);
 int pl_dataframe_write_json(
     PlFrame *frame, const char *path, int32_t json_lines, char **err);
 int pl_dataframe_write_json_pretty(
@@ -793,6 +797,7 @@ end
 
 local PARQUET_WRITE_OPTION_KEYS = {
   compression = true,
+  compression_level = true,
   statistics = true,
   row_group_size = true,
   data_page_size = true,
@@ -854,9 +859,15 @@ local function write_parquet_options(options)
   if type(statistics) ~= "boolean" then
     error("write_parquet statistics must be a boolean", 3)
   end
+  local level = options.compression_level
+  if level ~= nil and
+      (type(level) ~= "number" or level < 0 or level % 1 ~= 0 or
+        level > MAX_SAFE_INTEGER) then
+    error("write_parquet compression_level must be a non-negative integer", 3)
+  end
   return canonical, statistics,
     parquet_size_option(options, "row_group_size"),
-    parquet_size_option(options, "data_page_size")
+    parquet_size_option(options, "data_page_size"), level
 end
 
 local JSON_FORMAT_ALIASES = {
@@ -1626,6 +1637,57 @@ function DataFrame:quantile(column, probability)
   return query_value(self, query)
 end
 
+-- Distinct full rows with no argument, or distinct non-null values in a column.
+function DataFrame:n_unique(column)
+  if column == nil then
+    local unique = self:unique()
+    local rows = unique:shape()
+    unique:close()
+    return rows
+  end
+  if type(column) ~= "string" or column == "" then
+    error("n_unique column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(self, column, "n_unique")
+  return query_value(self, "SELECT COUNT(DISTINCT " ..
+    quote_identifier(selected[1]) .. ") AS value FROM df")
+end
+
+-- First value in frame order for one column.
+function DataFrame:first(column)
+  return aggregate_value(self, column, "FIRST", "first")
+end
+
+-- Last value in frame order for one column.
+function DataFrame:last(column)
+  return aggregate_value(self, column, "LAST", "last")
+end
+
+-- Pearson correlation between two numeric columns.
+function DataFrame:corr(left, right)
+  if type(left) ~= "string" or left == "" then
+    error("corr left column must be a non-empty string", 2)
+  end
+  if type(right) ~= "string" or right == "" then
+    error("corr right column must be a non-empty string", 2)
+  end
+  local left_name = subset_columns(self, left, "corr")[1]
+  local right_name = subset_columns(self, right, "corr")[1]
+  local schema = self:schema()
+  local function numeric(name)
+    local dtype = schema[name]
+    return type(dtype) == "string" and dtype:match("^[iuf]%d+$") ~= nil
+  end
+  if not numeric(left_name) then
+    error("corr left column must be numeric", 2)
+  end
+  if not numeric(right_name) then
+    error("corr right column must be numeric", 2)
+  end
+  return query_value(self, "SELECT CORR(" .. quote_identifier(left_name) ..
+    ", " .. quote_identifier(right_name) .. ") AS value FROM df")
+end
+
 function DataFrame:write_csv(path, options)
   if options == nil then
     return write_frame(self, path, "pl_dataframe_write_csv")
@@ -1680,12 +1742,19 @@ function DataFrame:write_parquet(path, options)
   if type(path) ~= "string" or path == "" then
     error("write_parquet path must be a string", 2)
   end
-  local compression, statistics, row_group_size, data_page_size =
-    write_parquet_options(options)
+  local compression, statistics, row_group_size, data_page_size,
+    compression_level = write_parquet_options(options)
   local err = ffi.new("char *[1]")
-  local status = lib.pl_dataframe_write_parquet_options(self:_require_open(),
-    path, compression, statistics and 1 or 0, row_group_size, data_page_size,
-    err)
+  local status
+  if compression_level ~= nil then
+    status = lib.pl_dataframe_write_parquet_leveled(self:_require_open(),
+      path, compression, statistics and 1 or 0, row_group_size, data_page_size,
+      compression_level, err)
+  else
+    status = lib.pl_dataframe_write_parquet_options(self:_require_open(),
+      path, compression, statistics and 1 or 0, row_group_size, data_page_size,
+      err)
+  end
   if status ~= 0 then
     error(take_error(err), 2)
   end

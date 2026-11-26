@@ -4667,6 +4667,115 @@ test("statistical aggregates reject invalid arguments", function()
     "quantile closed error")
 end)
 
+test("n_unique, first, last, and corr summarize columns", function()
+  local df = polars.read_csv(fixture)
+  eq(df:n_unique(), 5)
+  eq(df:n_unique("team"), 2)
+  eq(df:n_unique("active"), 2)
+  eq(df:n_unique("score"), 5)
+  eq(df:first("name"), "ana")
+  eq(df:last("name"), "eva")
+  eq(df:first("score"), 10)
+  eq(df:last("score"), 9)
+  eq(df:corr("score", "score"), 1)
+
+  local empty = df:head(0)
+  eq(empty:n_unique(), 0)
+  eq(empty:n_unique("score"), 0)
+  eq(empty:first("name"), polars.null)
+  eq(empty:last("name"), polars.null)
+  empty:close()
+  df:close()
+end)
+
+test("n_unique, first, last, and corr reject invalid arguments", function()
+  local df = polars.read_csv(fixture)
+  for _, method in ipairs({ "n_unique", "first", "last" }) do
+    local ok, err = pcall(function() df[method](df, 42) end)
+    eq(ok, false, method .. " accepted a non-string column")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      method .. " type error: " .. tostring(err))
+    ok, err = pcall(function() df[method](df, "") end)
+    eq(ok, false, method .. " accepted an empty column")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      method .. " empty error: " .. tostring(err))
+    ok, err = pcall(function() df[method](df, "missing") end)
+    eq(ok, false, method .. " accepted an unknown column")
+    truthy(tostring(err):find("is not a column", 1, true),
+      method .. " unknown error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:corr(42, "score") end)
+  eq(ok, false, "corr accepted a non-string left column")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "corr left type error: " .. tostring(err))
+  ok, err = pcall(function() df:corr("score", 42) end)
+  eq(ok, false, "corr accepted a non-string right column")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "corr right type error: " .. tostring(err))
+  ok, err = pcall(function() df:corr("score", "name") end)
+  eq(ok, false, "corr accepted a string column")
+  truthy(tostring(err):find("must be numeric", 1, true),
+    "corr numeric error: " .. tostring(err))
+  df:close()
+  for _, method in ipairs({ "n_unique", "first", "last" }) do
+    local closed_ok, closed_err = pcall(function() df[method](df, "score") end)
+    eq(closed_ok, false, method .. " accepted a closed frame")
+    truthy(tostring(closed_err):find("closed", 1, true),
+      method .. " closed error")
+  end
+  local closed_ok, closed_err = pcall(function() df:corr("score", "score") end)
+  eq(closed_ok, false, "corr accepted a closed frame")
+  truthy(tostring(closed_err):find("closed", 1, true), "corr closed error")
+end)
+
+test("write_parquet compression levels round-trip and validate", function()
+  local df = polars.read_csv(fixture)
+  local path = new_temp_path(".parquet")
+  df:write_parquet(path, { compression = "zstd", compression_level = 5 })
+  local loaded = polars.read_parquet(path)
+  eq(loaded:shape(), df:shape())
+  eq(loaded:to_table()[1].name, "ana")
+  loaded:close()
+
+  df:write_parquet(path, { compression = "gzip", compression_level = 9 })
+  loaded = polars.read_parquet(path)
+  eq(loaded:shape(), df:shape())
+  loaded:close()
+
+  df:write_parquet(path, { compression = "brotli", compression_level = 11 })
+  loaded = polars.read_parquet(path)
+  eq(loaded:shape(), df:shape())
+  loaded:close()
+
+  local ok, err = pcall(function()
+    df:write_parquet(path, { compression = "snappy", compression_level = 5 })
+  end)
+  eq(ok, false, "snappy accepted a compression level")
+  truthy(tostring(err):find("not supported", 1, true),
+    "snappy level error: " .. tostring(err))
+  ok, err = pcall(function()
+    df:write_parquet(path, { compression = "zstd", compression_level = 99 })
+  end)
+  eq(ok, false, "out-of-range zstd level accepted")
+  truthy(tostring(err):find("range", 1, true),
+    "zstd range error: " .. tostring(err))
+  for _, value in ipairs({ -1, 1.5, "5", true, {} }) do
+    ok, err = pcall(function()
+      df:write_parquet(path, { compression = "zstd", compression_level = value })
+    end)
+    eq(ok, false, "invalid compression_level accepted")
+    truthy(tostring(err):find("compression_level", 1, true),
+      "compression_level option error: " .. tostring(err))
+  end
+  df:close()
+  ok, err = pcall(function()
+    df:write_parquet(path, { compression_level = 3 })
+  end)
+  eq(ok, false, "closed write_parquet accepted")
+  truthy(tostring(err):find("closed", 1, true),
+    "closed write_parquet error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

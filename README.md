@@ -59,8 +59,9 @@ end
   `low_memory = true` for Polars' lower-memory reader path, and
   `rechunk = true` to consolidate the result into single-chunk columns
 - Parquet writer options: a `compression` codec (`zstd`, `snappy`, `gzip`,
-  `brotli`, `lz4`, `uncompressed`), `statistics = false` to skip column
-  statistics, and positive `row_group_size`/`data_page_size` chunk controls
+  `brotli`, `lz4`, `uncompressed`), a codec-specific `compression_level`,
+  `statistics = false` to skip column statistics, and positive
+  `row_group_size`/`data_page_size` chunk controls
 - JSON reader options: `format = "array"` (default; alias `"json"`) or
   `"lines"`/`"ndjson"`, a `columns` name/list projection, a non-negative
   `infer_schema_length` for JSON Lines (`0` scans the whole stream), and
@@ -71,8 +72,8 @@ end
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort (including null placement), sortedness
   checks, scalar `count`/`sum`/`mean`/`std`/`var`/`min`/`max`/`median`/
-  `quantile`, `top_k`/`bottom_k`, group-by, `value_counts`, drop, rename, and
-  with-columns that preserve column order
+  `quantile`/`n_unique`/`first`/`last`/`corr`, `top_k`/`bottom_k`, group-by,
+  `value_counts`, drop, rename, and with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()`, `to_json([options])` for compact, pretty, or JSON
   Lines strings, and `to_csv([options])` for CSV text, plus
@@ -151,12 +152,13 @@ Parquet column projections, row windows, low-memory and rechunk reads,
 compression codecs, statistics and chunk-size writer options, JSON array/JSON
 Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
 CSV low-memory and rechunked reads and CSV text output, scalar counts,
-statistical aggregates and quantiles, schema, estimated size, chunk counts,
-rechunking, shrinking, head, tail, slice, row indexing, projection, row
-reversal, transpose, sortedness checks, cumulative transforms, struct unnest,
-strict casting, subset distinct rows, list-column explode, filtering, sorting
-with null placement, grouping, all eager join types, column operations, SQL,
-JSON conversion and pretty strings,
+statistical aggregates and quantiles, distinct counts, first/last values,
+correlations, schema, estimated size, chunk counts, rechunking, shrinking,
+head, tail, slice, row indexing, projection, row reversal, transpose,
+sortedness checks, cumulative transforms, struct unnest, strict casting, subset
+distinct rows, list-column explode, filtering, sorting with null placement,
+grouping, all eager join types, column operations, SQL, JSON conversion and
+pretty strings,
 and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
 `POLARS_LUA_LIB`.
@@ -272,6 +274,11 @@ df:min("score")
 df:max("score")
 df:median("score")
 df:quantile("score", 0.5)
+df:n_unique()
+df:n_unique("team")
+df:first("name")
+df:last("name")
+df:corr("score", "score")
 df:is_sorted("score", false)
 df:transpose({ keep_names_as = "field" })
 df:unnest("meta", "_")
@@ -328,7 +335,8 @@ df:write_csv("european.csv", { delimiter = ";", decimal_comma = true })
 df:to_csv({ delimiter = ";", header = false })
 df:write_parquet("out.parquet")
 df:write_parquet("out.parquet", {
-  compression = "snappy",
+  compression = "zstd",
+  compression_level = 5,
   statistics = false,
   row_group_size = 1000,
   data_page_size = 65536,

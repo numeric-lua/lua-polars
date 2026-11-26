@@ -968,6 +968,46 @@ Non-string, empty, or unknown column names, non-numeric or out-of-range
 probabilities, and closed frames are errors. A Polars type error is surfaced
 when an aggregate is not supported for the column's dtype.
 
+### `df:n_unique([column]) -> integer`
+
+Without an argument returns the number of distinct full rows. With one column
+name returns the number of distinct non-null values in that column.
+
+```lua
+local distinct_rows = df:n_unique()
+local teams = df:n_unique("team")
+```
+
+### `df:first(column) -> value|nil`
+
+Returns the first value in frame order for one column. An empty frame returns
+`polars.null`.
+
+```lua
+local first_name = df:first("name")
+```
+
+### `df:last(column) -> value|nil`
+
+Returns the last value in frame order for one column. An empty frame returns
+`polars.null`.
+
+```lua
+local last_name = df:last("name")
+```
+
+### `df:corr(left, right) -> number|nil`
+
+Returns the Pearson correlation between two numeric columns. Both columns must
+exist and have a numeric dtype; insufficient data returns `polars.null`.
+
+```lua
+local perfect = df:corr("score", "score")
+```
+
+Non-string, empty, unknown, or non-numeric column names and closed frames are
+errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name
@@ -1148,8 +1188,10 @@ default statistics and chunk sizes.
 
 - `compression`: `"zstd"` (default), `"snappy"`, `"gzip"`, `"brotli"`,
   `"lz4"` (alias `"lz4-raw"`), or `"uncompressed"` (alias `"none"`), matched
-  case-insensitively. The pinned Polars writer uses each codec's default
-  level; there is no separate level option yet.
+  case-insensitively.
+- `compression_level`: a non-negative integer selecting the codec level.
+  Zstd accepts `1..=22`, gzip `0..=9`, and brotli `0..=11`; omitting it keeps
+  the codec default. Snappy, lz4, and uncompressed reject an explicit level.
 - `statistics`: a boolean, default `true`. `false` skips the column statistics
   (min/max/null count) that predicate pushdown readers can use.
 - `row_group_size`: a positive integer row count per row group. Omitted uses
@@ -1160,7 +1202,8 @@ default statistics and chunk sizes.
 ```lua
 df:write_parquet("out.parquet")
 df:write_parquet("out.parquet", {
-  compression = "snappy",
+  compression = "zstd",
+  compression_level = 5,
   statistics = false,
   row_group_size = 1000,
   data_page_size = 65536,
@@ -1466,6 +1509,10 @@ int pl_dataframe_write_parquet_options(
     PlFrame *frame, const char *path, const char *compression,
     int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
     char **err);
+int pl_dataframe_write_parquet_leveled(
+    PlFrame *frame, const char *path, const char *compression,
+    int32_t statistics, uint64_t row_group_size, uint64_t data_page_size,
+    int64_t compression_level, char **err);
 int pl_dataframe_write_json(
     PlFrame *frame, const char *path, int32_t json_lines, char **err);
 int pl_dataframe_write_json_pretty(
@@ -1708,6 +1755,11 @@ non-zero for the Polars defaults. A zero `row_group_size` or
 `data_page_size` keeps the Polars default; non-zero values are row and byte
 counts respectively. The compression string is borrowed for the duration of
 the call.
+
+`pl_dataframe_write_parquet_leveled` is additive and carries the same
+arguments plus `int64_t compression_level`. A negative level keeps the codec
+default; zstd, gzip, and brotli validate their codec-specific ranges, while
+other codecs reject an explicit level.
 
 `pl_dataframe_read_json` is additive and reads a JSON array (`json_lines` zero)
 or JSON Lines (`json_lines` non-zero) with an optional projection. It borrows

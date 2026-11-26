@@ -80,7 +80,22 @@
 - validation covers non-string, empty, or unknown columns, unsupported
   statistical input types, non-numeric or out-of-range quantile probabilities,
   and closed frames;
-- `./scripts/test.sh` passes 207 tests; `./scripts/smoke.sh` and
+- five more DataFrame/IO additions:
+  - `df:n_unique([column])` counts distinct full rows or distinct non-null
+    values in one column;
+  - `df:first(column)` and `df:last(column)` return the first and last values
+    in frame order;
+  - `df:corr(left, right)` returns the Pearson correlation of two numeric
+    columns;
+  - `df:write_parquet(..., { compression_level = n })` sets a codec-specific
+    level for zstd, gzip, or brotli and rejects levels for other codecs;
+- the new C ABI entry point is `pl_dataframe_write_parquet_leveled`; the
+  aggregate methods reuse the existing SQL entry point and every earlier
+  signature and default is unchanged;
+- validation covers non-string, empty, or unknown columns, non-numeric
+  correlation columns, non-negative integer compression levels, codec range
+  errors, unsupported codecs with a level, and closed frames;
+- `./scripts/test.sh` passes 210 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 
