@@ -95,7 +95,19 @@
 - validation covers non-string, empty, or unknown columns, non-numeric
   correlation columns, non-negative integer compression levels, codec range
   errors, unsupported codecs with a level, and closed frames;
-- `./scripts/test.sh` passes 210 tests; `./scripts/smoke.sh` and
+- five more DataFrame/IO additions:
+  - `df:covar(left, right)` and `df:covar_pop(left, right)` return sample and
+    population covariance for two numeric columns;
+  - `df:product(column)` returns the product of one numeric column;
+  - `df:concat(other)` stacks another frame's rows below the receiver;
+  - `df:hstack(other)` appends another frame's columns beside the receiver;
+- the new C ABI entry points are `pl_dataframe_vstack` and
+  `pl_dataframe_hstack`; covariance and product reuse existing frame and SQL
+  entry points, and every earlier signature and default is unchanged;
+- validation covers non-string, empty, unknown, or non-numeric covariance and
+  product columns, non-DataFrame or mismatched-schema concat inputs,
+  mismatched-height or duplicate-name hstack inputs, and closed frames;
+- `./scripts/test.sh` passes 212 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

@@ -3459,6 +3459,49 @@ pub unsafe extern "C" fn pl_dataframe_join(
     finish_frame(result, err)
 }
 
+/// Appends the rows of `right` below `left`.
+///
+/// Both handles must be open. Polars validates the column schemas and ordering
+/// rules; the result is a newly owned frame and both inputs are unchanged.
+/// This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_vstack(
+    left: *mut PlFrame,
+    right: *mut PlFrame,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let left = frame_ref(left)?;
+        let right = frame_ref(right)?;
+        left.df
+            .vstack(&right.df)
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
+/// Appends the columns of `right` beside `left`.
+///
+/// Both handles must be open and have the same height. Polars validates the
+/// resulting schema, including duplicate column names. The result is a newly
+/// owned frame and both inputs are unchanged. This entry point is additive.
+#[no_mangle]
+pub unsafe extern "C" fn pl_dataframe_hstack(
+    left: *mut PlFrame,
+    right: *mut PlFrame,
+    err: *mut *mut c_char,
+) -> *mut PlFrame {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<DataFrame, String> {
+        let left = frame_ref(left)?;
+        let right = frame_ref(right)?;
+        let columns = right.df.columns().to_vec();
+        left.df
+            .hstack(&columns)
+            .map_err(|error| error.to_string())
+    }));
+    finish_frame(result, err)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pl_dataframe_sql(
     ptr: *mut PlFrame,

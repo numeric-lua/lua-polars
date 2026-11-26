@@ -238,6 +238,10 @@ PlFrame *pl_dataframe_join(
     const char *const *left_on, uint64_t left_count,
     const char *const *right_on, uint64_t right_count,
     int32_t nulls_equal, char **err);
+PlFrame *pl_dataframe_vstack(
+    PlFrame *left, PlFrame *right, char **err);
+PlFrame *pl_dataframe_hstack(
+    PlFrame *left, PlFrame *right, char **err);
 PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
 int pl_dataframe_write_csv(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_csv_options(
@@ -1637,6 +1641,70 @@ function DataFrame:quantile(column, probability)
   return query_value(self, query)
 end
 
+-- Sample covariance between two numeric columns.
+function DataFrame:covar(left, right)
+  if type(left) ~= "string" or left == "" then
+    error("covar left column must be a non-empty string", 2)
+  end
+  if type(right) ~= "string" or right == "" then
+    error("covar right column must be a non-empty string", 2)
+  end
+  local left_name = subset_columns(self, left, "covar")[1]
+  local right_name = subset_columns(self, right, "covar")[1]
+  local schema = self:schema()
+  local function numeric(name)
+    local dtype = schema[name]
+    return type(dtype) == "string" and dtype:match("^[iuf]%d+$") ~= nil
+  end
+  if not numeric(left_name) then
+    error("covar left column must be numeric", 2)
+  end
+  if not numeric(right_name) then
+    error("covar right column must be numeric", 2)
+  end
+  return query_value(self, "SELECT COVAR_SAMP(" ..
+    quote_identifier(left_name) .. ", " .. quote_identifier(right_name) ..
+    ") AS value FROM df")
+end
+
+-- Population covariance between two numeric columns.
+function DataFrame:covar_pop(left, right)
+  if type(left) ~= "string" or left == "" then
+    error("covar_pop left column must be a non-empty string", 2)
+  end
+  if type(right) ~= "string" or right == "" then
+    error("covar_pop right column must be a non-empty string", 2)
+  end
+  local left_name = subset_columns(self, left, "covar_pop")[1]
+  local right_name = subset_columns(self, right, "covar_pop")[1]
+  local schema = self:schema()
+  local function numeric(name)
+    local dtype = schema[name]
+    return type(dtype) == "string" and dtype:match("^[iuf]%d+$") ~= nil
+  end
+  if not numeric(left_name) then
+    error("covar_pop left column must be numeric", 2)
+  end
+  if not numeric(right_name) then
+    error("covar_pop right column must be numeric", 2)
+  end
+  return query_value(self, "SELECT COVAR_POP(" ..
+    quote_identifier(left_name) .. ", " .. quote_identifier(right_name) ..
+    ") AS value FROM df")
+end
+
+-- Product of one numeric column.
+function DataFrame:product(column)
+  if type(column) ~= "string" or column == "" then
+    error("product column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(self, column, "product")
+  local cumulative = self:cum_prod(selected[1])
+  local value = cumulative:last(selected[1])
+  cumulative:close()
+  return value
+end
+
 -- Distinct full rows with no argument, or distinct non-null values in a column.
 function DataFrame:n_unique(column)
   if column == nil then
@@ -2153,6 +2221,27 @@ function DataFrame:join(other, options)
     left_on, #left_keys, right_on, #right_keys,
     nulls_equal and 1 or 0, err)
   return new_frame(pointer, err)
+end
+
+local function stack_frames(self, other, method, label)
+  if getmetatable(other) ~= DataFrame then
+    error(label .. " expects another DataFrame", 2)
+  end
+  local left = self:_require_open()
+  local right = other:_require_open()
+  local err = ffi.new("char *[1]")
+  local pointer = lib[method](left, right, err)
+  return new_frame(pointer, err)
+end
+
+-- Appends the rows of another frame below this one.
+function DataFrame:concat(other)
+  return stack_frames(self, other, "pl_dataframe_vstack", "concat")
+end
+
+-- Appends the columns of another frame beside this one.
+function DataFrame:hstack(other)
+  return stack_frames(self, other, "pl_dataframe_hstack", "hstack")
 end
 
 local polars = {

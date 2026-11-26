@@ -1008,6 +1008,36 @@ local perfect = df:corr("score", "score")
 Non-string, empty, unknown, or non-numeric column names and closed frames are
 errors.
 
+### `df:covar(left, right) -> number|nil`
+
+Returns the sample covariance between two numeric columns. Both columns must
+exist and be numeric; insufficient data returns `polars.null`.
+
+```lua
+local covariance = df:covar("score", "score")
+```
+
+### `df:covar_pop(left, right) -> number|nil`
+
+Returns the population covariance between two numeric columns with the same
+validation and null behavior as `covar`.
+
+```lua
+local population = df:covar_pop("score", "score")
+```
+
+### `df:product(column) -> number|nil`
+
+Returns the product of one numeric column. An empty or all-null column returns
+`polars.null`.
+
+```lua
+local product = df:product("score")
+```
+
+Non-string, empty, unknown, or non-numeric columns and closed frames are
+errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name
@@ -1078,6 +1108,29 @@ names are suffixed by Polars (`_right`).
 The error path covers missing keys, duplicate keys, mismatched key counts,
 keys passed to a cross join, invalid join types, invalid options, and closed
 handles.
+
+### `df:concat(other) -> DataFrame`
+
+Appends `other`'s rows below the receiver's rows. Both frames stay open, and
+Polars validates the schema compatibility. The result is a new frame.
+
+```lua
+local all_rows = first:concat(second)
+```
+
+A non-DataFrame argument, incompatible schemas, and closed handles are errors.
+
+### `df:hstack(other) -> DataFrame`
+
+Appends `other`'s columns beside the receiver's columns. Both frames must have
+the same height and both stay open. The result is a new frame.
+
+```lua
+local wider = left:hstack(right)
+```
+
+A non-DataFrame argument, a height mismatch, duplicate resulting column names,
+and closed handles are errors.
 
 ### `df:write_csv(path [, options]) -> DataFrame`
 
@@ -1475,6 +1528,10 @@ PlFrame *pl_dataframe_join(
     const char *const *left_on, uint64_t left_count,
     const char *const *right_on, uint64_t right_count,
     int32_t nulls_equal, char **err);
+PlFrame *pl_dataframe_vstack(
+    PlFrame *left, PlFrame *right, char **err);
+PlFrame *pl_dataframe_hstack(
+    PlFrame *left, PlFrame *right, char **err);
 PlFrame *pl_dataframe_sql(PlFrame *frame, const char *query, char **err);
 int pl_dataframe_write_csv(PlFrame *frame, const char *path, char **err);
 int pl_dataframe_write_csv_options(
@@ -1628,8 +1685,11 @@ freed with `pl_string_free`.
 Returned `char *` values and error strings must be freed with
 `pl_string_free`. A null frame pointer indicates an error when `err` is set.
 `pl_dataframe_join` borrows both input handles, including the key-name arrays
-for the duration of the call, and returns a newly owned frame. The write
-functions return `0` on success and non-zero on error.
+for the duration of the call, and returns a newly owned frame.
+`pl_dataframe_vstack` appends the right frame's rows below the left frame, and
+`pl_dataframe_hstack` appends the right frame's columns beside the left frame;
+both borrow their handles and return a newly owned frame. The write functions
+return `0` on success and non-zero on error.
 
 `pl_dataframe_read_csv_ex` is additive; the existing
 `pl_dataframe_read_csv` and `pl_dataframe_read_csv_options` keep their
