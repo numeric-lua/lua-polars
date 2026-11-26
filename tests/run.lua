@@ -4983,6 +4983,75 @@ test("filter_in and filter_not_in select scalar matches", function()
   truthy(tostring(err):find("closed", 1, true), "closed filter_not_in error")
 end)
 
+test("string and membership predicates append markers", function()
+  local df = polars.read_csv(fixture)
+  local contains = df:contains("name", "n")
+  eq(contains:columns()[5], "contains")
+  eq(contains:to_table()[1].contains, true)
+  eq(contains:to_table()[2].contains, false)
+  contains:close()
+
+  local starts = df:starts_with("name", "a")
+  eq(starts:to_table()[1].starts_with, true)
+  eq(starts:to_table()[2].starts_with, false)
+  starts:close()
+  local ends = df:ends_with("name", "o")
+  eq(ends:to_table()[1].ends_with, false)
+  eq(ends:to_table()[3].ends_with, true)
+  ends:close()
+
+  local member = df:is_in("score", { 7, 9 }, "selected")
+  eq(member:columns()[5], "selected")
+  eq(member:to_table()[1].selected, false)
+  eq(member:to_table()[2].selected, true)
+  eq(member:to_table()[5].selected, true)
+  member:close()
+
+  local bounded = df:between("score", 7, 10, "band")
+  eq(bounded:columns()[5], "band")
+  eq(bounded:to_table()[1].band, true)
+  eq(bounded:to_table()[3].band, false)
+  eq(bounded:to_table()[4].band, false)
+  bounded:close()
+  eq(select(1, df:shape()), 5, "predicate changed the input frame")
+  df:close()
+end)
+
+test("predicate markers reject invalid inputs", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { "contains", { "score", "1" }, "str dtype" },
+    { "contains", { "name", "" }, "non-empty string" },
+    { "starts_with", { "name", 42 }, "non-empty string" },
+    { "ends_with", { "name", "" }, "non-empty string" },
+    { "is_in", { "team", {} }, "must not be empty" },
+    { "is_in", { "team", "red" }, "non-empty list" },
+    { "is_in", { "team", { "red", {} } }, "finite number, string, or boolean" },
+    { "between", { "name", 0, 1 }, "must be numeric" },
+    { "between", { "score", 0 / 0, 1 }, "finite number" },
+    { "between", { "score", 10, 0 }, "not be greater than" },
+    { "is_in", { "missing", { 1 } }, "is not a column" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df[case[1]](df, unpack(case[2])) end)
+    eq(ok, false, case[1] .. " accepted invalid input")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:contains("name", "a", "name") end)
+  eq(ok, false, "predicate accepted a colliding marker name")
+  truthy(tostring(err):find("already exists", 1, true),
+    "marker collision error: " .. tostring(err))
+  ok, err = pcall(function() df:contains("name", "a", "") end)
+  eq(ok, false, "predicate accepted an empty marker name")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "marker name error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:between("score", 0, 1) end)
+  eq(ok, false, "closed predicate accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed predicate error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

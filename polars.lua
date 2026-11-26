@@ -1835,6 +1835,110 @@ function DataFrame:filter_not_in(column, values)
   return filter_scalar_values(self, column, values, true, "filter_not_in")
 end
 
+local function marker_column(frame, name, label)
+  name = name == nil and label or name
+  if type(name) ~= "string" or name == "" then
+    error(label .. " marker name must be a non-empty string", 2)
+  end
+  if frame:schema()[name] ~= nil then
+    error(label .. " marker column '" .. name .. "' already exists", 2)
+  end
+  return name
+end
+
+local function string_marker_column(frame, column, label)
+  if type(column) ~= "string" or column == "" then
+    error(label .. " column must be a non-empty string", 2)
+  end
+  local name = subset_columns(frame, column, label)[1]
+  if frame:schema()[name] ~= "str" then
+    error(label .. " column must have str dtype", 2)
+  end
+  return name
+end
+
+local function marker_frame(frame, name, condition, label)
+  name = marker_column(frame, name, label)
+  return frame:sql("SELECT *, CASE WHEN " .. condition ..
+    " THEN true ELSE false END AS " .. quote_identifier(name) .. " FROM df")
+end
+
+-- True when a string column contains a non-empty literal substring.
+function DataFrame:contains(column, needle, name)
+  local source = string_marker_column(self, column, "contains")
+  if type(needle) ~= "string" or needle == "" then
+    error("contains needle must be a non-empty string", 2)
+  end
+  local literal = sql_scalar_literal(needle, "contains needle")
+  return marker_frame(self, name,
+    "STRPOS(" .. quote_identifier(source) .. ", " .. literal .. ") > 0",
+    "contains")
+end
+
+-- True when a string column starts with a non-empty literal prefix.
+function DataFrame:starts_with(column, prefix, name)
+  local source = string_marker_column(self, column, "starts_with")
+  if type(prefix) ~= "string" or prefix == "" then
+    error("starts_with prefix must be a non-empty string", 2)
+  end
+  local literal = sql_scalar_literal(prefix, "starts_with prefix")
+  return marker_frame(self, name,
+    "STARTS_WITH(" .. quote_identifier(source) .. ", " .. literal .. ")",
+    "starts_with")
+end
+
+-- True when a string column ends with a non-empty literal suffix.
+function DataFrame:ends_with(column, suffix, name)
+  local source = string_marker_column(self, column, "ends_with")
+  if type(suffix) ~= "string" or suffix == "" then
+    error("ends_with suffix must be a non-empty string", 2)
+  end
+  local literal = sql_scalar_literal(suffix, "ends_with suffix")
+  return marker_frame(self, name,
+    "ENDS_WITH(" .. quote_identifier(source) .. ", " .. literal .. ")",
+    "ends_with")
+end
+
+-- True when a column equals one of a non-empty list of scalar values.
+function DataFrame:is_in(column, values, name)
+  if type(column) ~= "string" or column == "" then
+    error("is_in column must be a non-empty string", 2)
+  end
+  local source = subset_columns(self, column, "is_in")[1]
+  local list = scalar_value_list(values, "is_in")
+  local literals = {}
+  for index, value in ipairs(list) do
+    literals[index] = sql_scalar_literal(value, "is_in value at index " ..
+      tostring(index))
+  end
+  return marker_frame(self, name, quote_identifier(source) .. " IN (" ..
+    table.concat(literals, ", ") .. ")", "is_in")
+end
+
+-- True when a numeric column falls within an inclusive range.
+function DataFrame:between(column, lower, upper, name)
+  if type(column) ~= "string" or column == "" then
+    error("between column must be a non-empty string", 2)
+  end
+  local source = subset_columns(self, column, "between")[1]
+  local dtype = self:schema()[source]
+  if type(dtype) ~= "string" or not dtype:match("^[iuf]%d+$") then
+    error("between column must be numeric", 2)
+  end
+  for label, value in pairs({ lower = lower, upper = upper }) do
+    if type(value) ~= "number" or value ~= value or value == math.huge or
+        value == -math.huge then
+      error("between " .. label .. " must be a finite number", 2)
+    end
+  end
+  if lower > upper then
+    error("between lower must not be greater than upper", 2)
+  end
+  local condition = quote_identifier(source) .. " BETWEEN " ..
+    string.format("%.17g", lower) .. " AND " .. string.format("%.17g", upper)
+  return marker_frame(self, name, condition, "between")
+end
+
 -- Distinct full rows with no argument, or distinct non-null values in a column.
 function DataFrame:n_unique(column)
   if column == nil then

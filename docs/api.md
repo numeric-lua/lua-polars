@@ -1098,6 +1098,58 @@ local other = df:filter_not_in("team", { "red" })
 Malformed, empty, or non-contiguous value lists, non-scalar entries, unknown
 columns, type mismatches reported by Polars, and closed frames are errors.
 
+### `df:contains(column, needle [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"contains"`) that is true when
+the `str` column contains the non-empty literal `needle`. Null source values
+produce false. The input frame is unchanged.
+
+```lua
+local marked = df:contains("name", "an")
+```
+
+### `df:starts_with(column, prefix [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"starts_with"`) for a non-empty
+literal prefix on a `str` column.
+
+```lua
+local marked = df:starts_with("name", "a")
+```
+
+### `df:ends_with(column, suffix [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"ends_with"`) for a non-empty
+literal suffix on a `str` column.
+
+```lua
+local marked = df:ends_with("name", "a")
+```
+
+### `df:is_in(column, values [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"is_in"`) that is true when the
+column equals one of a non-empty contiguous list of scalar values. Null source
+values produce false.
+
+```lua
+local marked = df:is_in("team", { "red", "blue" })
+```
+
+### `df:between(column, lower, upper [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"between"`) that is true when a
+numeric column falls within the inclusive `[lower, upper]` range. Both bounds
+must be finite numbers and `lower <= upper`; null source values produce false.
+
+```lua
+local marked = df:between("score", 7, 10)
+```
+
+Non-string or wrong-dtype source columns, empty match literals, malformed or
+empty value lists, non-scalar membership values, non-numeric columns, invalid
+range bounds, empty or colliding marker names, and closed frames are errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name

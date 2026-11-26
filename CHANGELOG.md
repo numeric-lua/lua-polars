@@ -118,7 +118,20 @@
 - validation covers non-boolean any/all columns, non-string or empty columns,
   missing replace columns, non-scalar replace values, malformed or empty filter
   lists, unknown columns, and closed frames;
-- `./scripts/test.sh` passes 215 tests; `./scripts/smoke.sh` and
+- five more DataFrame additions:
+  - `df:contains(column, needle [, name])`,
+    `df:starts_with(column, prefix [, name])`, and
+    `df:ends_with(column, suffix [, name])` append Boolean string-match markers;
+  - `df:is_in(column, values [, name])` appends a Boolean membership marker;
+  - `df:between(column, lower, upper [, name])` appends an inclusive numeric
+    range marker;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers non-string or wrong-dtype source columns, empty match
+  literals, malformed or empty value lists, non-scalar membership values,
+  non-numeric ranges, invalid bounds, colliding or empty marker names, and
+  closed frames;
+- `./scripts/test.sh` passes 217 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 
