@@ -73,8 +73,9 @@ end
 - helpers for select, filter, sort (including null placement), sortedness
   checks, scalar `count`/`sum`/`mean`/`std`/`var`/`min`/`max`/`median`/
   `quantile`/`n_unique`/`first`/`last`/`product`/`corr`/`covar`/`covar_pop`,
-  `top_k`/`bottom_k`, group-by, `value_counts`, drop, rename, and with-columns
-  that preserve column order
+  `any`/`all`, scalar `replace`, `filter_in`/`filter_not_in`, `top_k`/
+  `bottom_k`, group-by, `value_counts`, drop, rename, and with-columns that
+  preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more
   keys, plus row-wise `concat(other)` and column-wise `hstack(other)`
 - row-oriented `to_table()`, `to_json([options])` for compact, pretty, or JSON
@@ -155,8 +156,9 @@ compression codecs, statistics and chunk-size writer options, JSON array/JSON
 Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
 CSV low-memory and rechunked reads and CSV text output, scalar counts,
 statistical aggregates and quantiles, distinct counts, first/last values,
-products, correlations and covariances, row/column stacking, schema, estimated
-size, chunk counts, rechunking, shrinking,
+products, correlations and covariances, boolean any/all, scalar replacement,
+membership filtering, row/column stacking, schema, estimated size, chunk
+counts, rechunking, shrinking,
 head, tail, slice, row indexing, projection, row reversal, transpose,
 sortedness checks, cumulative transforms, struct unnest, strict casting, subset
 distinct rows, list-column explode, filtering, sorting with null placement,
@@ -285,6 +287,11 @@ df:product("score")
 df:corr("score", "score")
 df:covar("score", "score")
 df:covar_pop("score", "score")
+df:any("active")
+df:all("active")
+df:replace("red", "RED", "team")
+df:filter_in("team", { "red", "blue" })
+df:filter_not_in("team", { "red" })
 df:is_sorted("score", false)
 df:transpose({ keep_names_as = "field" })
 df:unnest("meta", "_")

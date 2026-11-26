@@ -107,7 +107,18 @@
 - validation covers non-string, empty, unknown, or non-numeric covariance and
   product columns, non-DataFrame or mismatched-schema concat inputs,
   mismatched-height or duplicate-name hstack inputs, and closed frames;
-- `./scripts/test.sh` passes 212 tests; `./scripts/smoke.sh` and
+- five more DataFrame additions:
+  - `df:any(column)` and `df:all(column)` inspect bool columns, ignoring nulls;
+  - `df:replace(old, new, columns)` substitutes a scalar value in selected
+    columns;
+  - `df:filter_in(column, values)` and `df:filter_not_in(column, values)` keep
+    or drop rows matching a non-empty list of scalar values;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier signature and default;
+- validation covers non-boolean any/all columns, non-string or empty columns,
+  missing replace columns, non-scalar replace values, malformed or empty filter
+  lists, unknown columns, and closed frames;
+- `./scripts/test.sh` passes 215 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

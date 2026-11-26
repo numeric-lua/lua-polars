@@ -1038,6 +1038,66 @@ local product = df:product("score")
 Non-string, empty, unknown, or non-numeric columns and closed frames are
 errors.
 
+### `df:any(column) -> boolean`
+
+Returns true when at least one non-null value in a `bool` column is true.
+Nulls are ignored; an empty or all-null column returns false.
+
+```lua
+local has_active = df:any("active")
+```
+
+### `df:all(column) -> boolean`
+
+Returns true when every non-null value in a `bool` column is true. Nulls are
+ignored; an empty or all-null column returns true.
+
+```lua
+local all_active = df:all("active")
+```
+
+Non-string, empty, unknown, or non-boolean columns and closed frames are
+errors.
+
+### `df:replace(old, new, columns) -> DataFrame`
+
+Replaces scalar `old` values with scalar `new` in the selected columns. Each
+value must be a finite number, string, or boolean; strings are SQL-escaped and
+NUL is rejected. `columns` is a required name or non-empty contiguous list.
+Nulls are not matched; use `fill_null` for nulls. Unselected columns and the
+input frame are preserved.
+
+```lua
+local renamed = df:replace("red", "RED", "team")
+local rescored = df:replace(10, 0, { "score" })
+```
+
+A missing or malformed column list, a non-scalar value, a type mismatch
+reported by Polars, and closed frames are errors.
+
+### `df:filter_in(column, values) -> DataFrame`
+
+Keeps rows whose column equals one of a non-empty contiguous list of scalar
+values. Values may be finite numbers, strings, or booleans. Null column values
+do not match. The input frame is unchanged.
+
+```lua
+local red_or_blue = df:filter_in("team", { "red", "blue" })
+local middle = df:filter_in("score", { 7, 9 })
+```
+
+### `df:filter_not_in(column, values) -> DataFrame`
+
+Drops rows whose column equals one of the listed scalar values, using the same
+value validation as `filter_in`.
+
+```lua
+local other = df:filter_not_in("team", { "red" })
+```
+
+Malformed, empty, or non-contiguous value lists, non-scalar entries, unknown
+columns, type mismatches reported by Polars, and closed frames are errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name

@@ -4847,6 +4847,142 @@ test("concat appends rows and hstack appends columns", function()
   truthy(tostring(err):find("closed", 1, true), "closed hstack error")
 end)
 
+test("any and all inspect boolean columns", function()
+  local df = polars.read_csv(fixture)
+  eq(df:any("active"), true)
+  eq(df:all("active"), false)
+
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("active\ntrue\ntrue\n\n")
+  file:close()
+  local mostly = polars.read_csv(path)
+  eq(mostly:any("active"), true)
+  eq(mostly:all("active"), true, "all should ignore null values")
+  mostly:close()
+
+  local empty = df:head(0)
+  eq(empty:any("active"), false)
+  eq(empty:all("active"), true)
+  empty:close()
+
+  local ok, err = pcall(function() df:any("score") end)
+  eq(ok, false, "any accepted a non-boolean column")
+  truthy(tostring(err):find("bool dtype", 1, true),
+    "any dtype error: " .. tostring(err))
+  ok, err = pcall(function() df:all(42) end)
+  eq(ok, false, "all accepted a non-string column")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "all type error: " .. tostring(err))
+  ok, err = pcall(function() df:any("missing") end)
+  eq(ok, false, "any accepted an unknown column")
+  truthy(tostring(err):find("is not a column", 1, true),
+    "any unknown error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:any("active") end)
+  eq(ok, false, "closed any accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed any error")
+  ok, err = pcall(function() df:all("active") end)
+  eq(ok, false, "closed all accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed all error")
+end)
+
+test("replace swaps scalar values in selected columns", function()
+  local df = polars.read_csv(fixture)
+  local teams = df:replace("red", "RED", "team")
+  local rows = teams:to_table()
+  eq(rows[1].team, "RED")
+  eq(rows[2].team, "RED")
+  eq(rows[3].team, "blue")
+  eq(rows[5].team, "RED")
+  eq(rows[1].score, 10, "replace touched an unselected column")
+  teams:close()
+
+  local scores = df:replace(10, 0, { "score" })
+  eq(scores:schema().score, "i64")
+  eq(scores:to_table()[1].score, 0)
+  eq(scores:to_table()[2].score, 7)
+  scores:close()
+
+  local active = df:replace(true, false, "active")
+  eq(active:to_table()[1].active, false)
+  eq(active:to_table()[3].active, false)
+  active:close()
+  eq(df:to_table()[1].team, "red", "replace changed the input frame")
+  eq(df:to_table()[1].score, 10, "replace changed the input score")
+
+  local ok, err = pcall(function() df:replace("red", "RED") end)
+  eq(ok, false, "replace accepted missing columns")
+  truthy(tostring(err):find("columns must be", 1, true),
+    "replace columns error: " .. tostring(err))
+  ok, err = pcall(function() df:replace(nil, "x", "team") end)
+  eq(ok, false, "replace accepted a nil old value")
+  truthy(tostring(err):find("finite number, string, or boolean", 1, true),
+    "replace value error: " .. tostring(err))
+  ok, err = pcall(function() df:replace(0 / 0, 1, "score") end)
+  eq(ok, false, "replace accepted a NaN value")
+  truthy(tostring(err):find("finite number", 1, true),
+    "replace NaN error: " .. tostring(err))
+  ok, err = pcall(function() df:replace("x\0y", "z", "team") end)
+  eq(ok, false, "replace accepted a NUL string")
+  truthy(tostring(err):find("must not contain NUL", 1, true),
+    "replace NUL error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:replace("red", "RED", "team") end)
+  eq(ok, false, "closed replace accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed replace error")
+end)
+
+test("filter_in and filter_not_in select scalar matches", function()
+  local df = polars.read_csv(fixture)
+  local red = df:filter_in("team", { "red" })
+  eq(red:shape(), 3)
+  eq(table.concat(red:columns(), ","), "name,team,score,active")
+  red:close()
+
+  local not_red = df:filter_not_in("team", { "red" })
+  eq(not_red:shape(), 2)
+  eq(not_red:to_table()[1].team, "blue")
+  not_red:close()
+
+  local middle = df:filter_in("score", { 7, 9 })
+  eq(middle:shape(), 2)
+  eq(middle:to_table()[1].score, 7)
+  eq(middle:to_table()[2].score, 9)
+  middle:close()
+
+  local not_middle = df:filter_not_in("score", { 7, 9 })
+  eq(not_middle:shape(), 3)
+  not_middle:close()
+  eq(select(1, df:shape()), 5, "filter in changed the input frame")
+
+  local cases = {
+    { "team", {}, "must not be empty" },
+    { "team", "red", "must be a non-empty list" },
+    { "team", { [1] = "red", [3] = "blue" }, "contiguous list" },
+    { "team", { "red", {} }, "finite number, string, or boolean" },
+    { 42, { "red" }, "non-empty string" },
+    { "missing", { "red" }, "is not a column" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df:filter_in(case[1], case[2]) end)
+    eq(ok, false, "invalid filter_in arguments accepted")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:filter_not_in("team", {}) end)
+  eq(ok, false, "filter_not_in accepted empty values")
+  truthy(tostring(err):find("must not be empty", 1, true),
+    "filter_not_in empty error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:filter_in("team", { "red" }) end)
+  eq(ok, false, "closed filter_in accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed filter_in error")
+  ok, err = pcall(function() df:filter_not_in("team", { "red" }) end)
+  eq(ok, false, "closed filter_not_in accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed filter_not_in error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

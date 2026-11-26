@@ -1577,6 +1577,64 @@ local function aggregate_value(frame, column, function_name, label)
   return query_value(frame, query)
 end
 
+local function sql_scalar_literal(value, label)
+  if type(value) == "boolean" then
+    return value and "true" or "false"
+  end
+  if type(value) == "number" then
+    if value ~= value or value == math.huge or value == -math.huge then
+      error(label .. " must be a finite number", 2)
+    end
+    return string.format("%.17g", value)
+  end
+  if type(value) == "string" then
+    if value:find("\0", 1, true) then
+      error(label .. " string must not contain NUL", 2)
+    end
+    return "'" .. value:gsub("'", "''") .. "'"
+  end
+  error(label .. " must be a finite number, string, or boolean", 2)
+end
+
+local function scalar_value_list(values, label)
+  if type(values) ~= "table" then
+    error(label .. " values must be a non-empty list", 2)
+  end
+  local keys = {}
+  for key in pairs(values) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      error(label .. " values must be a non-empty contiguous list", 2)
+    end
+    keys[#keys + 1] = key
+  end
+  if #keys == 0 then
+    error(label .. " values must not be empty", 2)
+  end
+  table.sort(keys)
+  for index, key in ipairs(keys) do
+    if key ~= index then
+      error(label .. " values must be a contiguous list", 2)
+    end
+  end
+  local result = {}
+  for index = 1, #keys do
+    result[index] = values[index]
+  end
+  return result
+end
+
+local function boolean_column_name(frame, column, label)
+  if type(column) ~= "string" or column == "" then
+    error(label .. " column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(frame, column, label)
+  local name = selected[1]
+  if frame:schema()[name] ~= "bool" then
+    error(label .. " column must have bool dtype", 2)
+  end
+  return name
+end
+
 -- Scalar sum of a numeric column; null when no values are present.
 function DataFrame:sum(column)
   return aggregate_value(self, column, "SUM", "sum")
@@ -1703,6 +1761,78 @@ function DataFrame:product(column)
   local value = cumulative:last(selected[1])
   cumulative:close()
   return value
+end
+
+-- True when at least one non-null value in a bool column is true.
+function DataFrame:any(column)
+  local name = boolean_column_name(self, column, "any")
+  local count = query_value(self, "SELECT COUNT(*) AS value FROM df WHERE " ..
+    quote_identifier(name) .. " = true")
+  return count > 0
+end
+
+-- True when every non-null value in a bool column is true; nulls are ignored.
+function DataFrame:all(column)
+  local name = boolean_column_name(self, column, "all")
+  local total = self:count(name)
+  if total == 0 then
+    return true
+  end
+  local truthy = query_value(self, "SELECT COUNT(*) AS value FROM df WHERE " ..
+    quote_identifier(name) .. " = true")
+  return truthy == total
+end
+
+-- Replaces scalar old values with a scalar new value in selected columns.
+function DataFrame:replace(old, new, columns)
+  local old_literal = sql_scalar_literal(old, "replace old value")
+  local new_literal = sql_scalar_literal(new, "replace new value")
+  local selected = subset_columns(self, columns, "replace")
+  if selected == nil then
+    error("replace columns must be a column name or a list of names", 2)
+  end
+  local wanted = {}
+  for _, name in ipairs(selected) do
+    wanted[name] = true
+  end
+  local projections = {}
+  for _, name in ipairs(self:columns()) do
+    local quoted = quote_identifier(name)
+    if wanted[name] then
+      projections[#projections + 1] = "CASE WHEN " .. quoted .. " = " ..
+        old_literal .. " THEN " .. new_literal .. " ELSE " .. quoted ..
+        " END AS " .. quoted
+    else
+      projections[#projections + 1] = quoted
+    end
+  end
+  return self:sql("SELECT " .. table.concat(projections, ", ") .. " FROM df")
+end
+
+local function filter_scalar_values(frame, column, values, negate, label)
+  if type(column) ~= "string" or column == "" then
+    error(label .. " column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(frame, column, label)
+  local list = scalar_value_list(values, label)
+  local literals = {}
+  for index, value in ipairs(list) do
+    literals[index] = sql_scalar_literal(value, label .. " value at index " ..
+      tostring(index))
+  end
+  local operator = negate and " NOT IN (" or " IN ("
+  return frame:sql("SELECT * FROM df WHERE " .. quote_identifier(selected[1]) ..
+    operator .. table.concat(literals, ", ") .. ")")
+end
+
+-- Keeps rows whose column matches one of the scalar values.
+function DataFrame:filter_in(column, values)
+  return filter_scalar_values(self, column, values, false, "filter_in")
+end
+
+-- Drops rows whose column matches one of the scalar values.
+function DataFrame:filter_not_in(column, values)
+  return filter_scalar_values(self, column, values, true, "filter_not_in")
 end
 
 -- Distinct full rows with no argument, or distinct non-null values in a column.
