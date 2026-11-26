@@ -67,7 +67,20 @@
 - validation covers non-string and empty aggregate columns, unknown aggregate
   columns, unsupported aggregate input types, non-boolean `rechunk`, and closed
   frames;
-- `./scripts/test.sh` passes 204 tests; `./scripts/smoke.sh` and
+- five more scalar aggregate additions:
+  - `df:count([column])` returns the row count, or the non-null count for one
+    column;
+  - `df:std(column)` and `df:var(column)` return the sample standard deviation
+    and variance;
+  - `df:median(column)` returns the median;
+  - `df:quantile(column, probability)` returns a continuous quantile in
+    `[0, 1]`;
+- these also reuse the existing SQL entry point, add no C ABI symbols, and
+  preserve every earlier default;
+- validation covers non-string, empty, or unknown columns, unsupported
+  statistical input types, non-numeric or out-of-range quantile probabilities,
+  and closed frames;
+- `./scripts/test.sh` passes 207 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

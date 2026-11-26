@@ -4580,6 +4580,93 @@ test("read_csv rechunk returns single-chunk columns", function()
     "read_csv rechunk error: " .. tostring(err))
 end)
 
+test("count reports rows and non-null column values", function()
+  local df = polars.read_csv(fixture)
+  eq(df:count(), 5)
+  eq(df:count("score"), 5)
+  local empty = df:head(0)
+  eq(empty:count(), 0)
+  eq(empty:count("score"), 0)
+  empty:close()
+
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("score\n1\n\n3\n")
+  file:close()
+  local nullable = polars.read_csv(path)
+  eq(nullable:count("score"), 2)
+  nullable:close()
+  df:close()
+end)
+
+test("std, var, median, and quantile summarize columns", function()
+  local df = polars.read_csv(fixture)
+  truthy(math.abs(df:std("score") - 2.7018512172213) < 1e-9,
+    "unexpected sample standard deviation")
+  truthy(math.abs(df:var("score") - 7.3) < 1e-9,
+    "unexpected sample variance")
+  eq(df:median("score"), 9)
+  eq(df:quantile("score", 0), 5)
+  eq(df:quantile("score", 0.5), 9)
+  eq(df:quantile("score", 1), 12)
+
+  local empty = df:head(0)
+  eq(empty:std("score"), polars.null)
+  eq(empty:var("score"), polars.null)
+  eq(empty:median("score"), polars.null)
+  eq(empty:quantile("score", 0.5), polars.null)
+  empty:close()
+  df:close()
+end)
+
+test("statistical aggregates reject invalid arguments", function()
+  local df = polars.read_csv(fixture)
+  local methods = { "count", "std", "var", "median" }
+  for _, method in ipairs(methods) do
+    local ok, err = pcall(function() df[method](df, 42) end)
+    eq(ok, false, method .. " accepted a non-string column")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      method .. " type error: " .. tostring(err))
+    ok, err = pcall(function() df[method](df, "") end)
+    eq(ok, false, method .. " accepted an empty column")
+    truthy(tostring(err):find("non-empty string", 1, true),
+      method .. " empty error: " .. tostring(err))
+    ok, err = pcall(function() df[method](df, "missing") end)
+    eq(ok, false, method .. " accepted an unknown column")
+    truthy(tostring(err):find("is not a column", 1, true),
+      method .. " unknown error: " .. tostring(err))
+  end
+  local probability_cases = { -0.1, 1.1, "0.5", 0 / 0, math.huge,
+    -math.huge }
+  for _, value in ipairs(probability_cases) do
+    local ok, err = pcall(function() df:quantile("score", value) end)
+    eq(ok, false, "invalid quantile probability accepted")
+    truthy(tostring(err):find("between 0 and 1", 1, true),
+      "quantile probability error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:quantile(42, 0.5) end)
+  eq(ok, false, "quantile accepted a non-string column")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "quantile column error: " .. tostring(err))
+  ok, err = pcall(function() df:quantile("missing", 0.5) end)
+  eq(ok, false, "quantile accepted an unknown column")
+  truthy(tostring(err):find("is not a column", 1, true),
+    "quantile unknown error: " .. tostring(err))
+  df:close()
+  for _, method in ipairs(methods) do
+    local closed_ok, closed_err = pcall(function()
+      df[method](df, "score")
+    end)
+    eq(closed_ok, false, method .. " accepted a closed frame")
+    truthy(tostring(closed_err):find("closed", 1, true),
+      method .. " closed error")
+  end
+  local closed_ok, closed_err = pcall(function() df:quantile("score", 0.5) end)
+  eq(closed_ok, false, "quantile accepted a closed frame")
+  truthy(tostring(closed_err):find("closed", 1, true),
+    "quantile closed error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

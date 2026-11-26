@@ -1544,6 +1544,14 @@ function DataFrame:value_counts(columns, options)
   return self:sql(query)
 end
 
+local function query_value(frame, query)
+  local result = frame:sql(query)
+  local rows = result:to_table()
+  local value = rows[1] and rows[1].value or json.null
+  result:close()
+  return value
+end
+
 local function aggregate_value(frame, column, function_name, label)
   if type(column) ~= "string" or column == "" then
     error(label .. " column must be a non-empty string", 2)
@@ -1551,11 +1559,7 @@ local function aggregate_value(frame, column, function_name, label)
   local selected = subset_columns(frame, column, label)
   local query = "SELECT " .. function_name .. "(" ..
     quote_identifier(selected[1]) .. ") AS value FROM df"
-  local result = frame:sql(query)
-  local rows = result:to_table()
-  local value = rows[1] and rows[1].value or json.null
-  result:close()
-  return value
+  return query_value(frame, query)
 end
 
 -- Scalar sum of a numeric column; null when no values are present.
@@ -1576,6 +1580,50 @@ end
 -- Scalar maximum of an orderable column; null when no values are present.
 function DataFrame:max(column)
   return aggregate_value(self, column, "MAX", "max")
+end
+
+-- Row count with no argument, or non-null count for one column.
+function DataFrame:count(column)
+  if column == nil then
+    return query_value(self, "SELECT COUNT(*) AS value FROM df")
+  end
+  if type(column) ~= "string" or column == "" then
+    error("count column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(self, column, "count")
+  return query_value(self, "SELECT COUNT(" ..
+    quote_identifier(selected[1]) .. ") AS value FROM df")
+end
+
+-- Sample standard deviation of a numeric column; null when no values exist.
+function DataFrame:std(column)
+  return aggregate_value(self, column, "STDDEV", "std")
+end
+
+-- Sample variance of a numeric column; null when no values exist.
+function DataFrame:var(column)
+  return aggregate_value(self, column, "VARIANCE", "var")
+end
+
+-- Median of an orderable column; null when no values exist.
+function DataFrame:median(column)
+  return aggregate_value(self, column, "MEDIAN", "median")
+end
+
+-- Continuous quantile in [0, 1] for an orderable column.
+function DataFrame:quantile(column, probability)
+  if type(probability) ~= "number" or probability ~= probability or
+      probability == math.huge or probability == -math.huge or
+      probability < 0 or probability > 1 then
+    error("quantile probability must be a finite number between 0 and 1", 2)
+  end
+  if type(column) ~= "string" or column == "" then
+    error("quantile column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(self, column, "quantile")
+  local query = "SELECT QUANTILE_CONT(" .. quote_identifier(selected[1]) ..
+    ", " .. string.format("%.17g", probability) .. ") AS value FROM df"
+  return query_value(self, query)
 end
 
 function DataFrame:write_csv(path, options)

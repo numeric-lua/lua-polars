@@ -91,6 +91,13 @@ check(row_tools:sum("score") == 43, "unexpected scalar sum")
 check(row_tools:mean("score") == 8.6, "unexpected scalar mean")
 check(row_tools:min("score") == 5, "unexpected scalar minimum")
 check(row_tools:max("score") == 12, "unexpected scalar maximum")
+check(row_tools:count() == 5, "unexpected row count")
+check(row_tools:count("score") == 5, "unexpected non-null count")
+check(row_tools:median("score") == 9, "unexpected median")
+check(row_tools:quantile("score", 0.5) == 9, "unexpected quantile")
+check(row_tools:var("score") == 7.3, "unexpected variance")
+check(math.abs(row_tools:std("score") - 2.7018512172213) < 1e-9,
+  "unexpected standard deviation")
 local duplicated = row_tools:is_duplicated()
 check(duplicated:columns()[5] == "duplicated",
   "duplicate marker was not appended")

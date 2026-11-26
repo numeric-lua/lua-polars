@@ -70,8 +70,9 @@ end
 - schema, shape, head/tail/slice, ordered columns, and `with_row_index`
 - SQL queries against the DataFrame registered as `df`
 - helpers for select, filter, sort (including null placement), sortedness
-  checks, scalar `sum`/`mean`/`min`/`max`, `top_k`/`bottom_k`, group-by,
-  `value_counts`, drop, rename, and with-columns that preserve column order
+  checks, scalar `count`/`sum`/`mean`/`std`/`var`/`min`/`max`/`median`/
+  `quantile`, `top_k`/`bottom_k`, group-by, `value_counts`, drop, rename, and
+  with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more keys
 - row-oriented `to_table()`, `to_json([options])` for compact, pretty, or JSON
   Lines strings, and `to_csv([options])` for CSV text, plus
@@ -149,12 +150,13 @@ options, UTF-8 BOM, pretty JSON output, and decimal-comma output,
 Parquet column projections, row windows, low-memory and rechunk reads,
 compression codecs, statistics and chunk-size writer options, JSON array/JSON
 Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
-CSV low-memory and rechunked reads and CSV text output, scalar aggregates,
-schema, estimated size, chunk counts, rechunking, shrinking, head, tail, slice,
-row indexing, projection, row reversal, transpose, sortedness checks,
-cumulative transforms, struct unnest, strict casting, subset distinct rows,
-list-column explode, filtering, sorting with null placement, grouping, all
-eager join types, column operations, SQL, JSON conversion and pretty strings,
+CSV low-memory and rechunked reads and CSV text output, scalar counts,
+statistical aggregates and quantiles, schema, estimated size, chunk counts,
+rechunking, shrinking, head, tail, slice, row indexing, projection, row
+reversal, transpose, sortedness checks, cumulative transforms, struct unnest,
+strict casting, subset distinct rows, list-column explode, filtering, sorting
+with null placement, grouping, all eager join types, column operations, SQL,
+JSON conversion and pretty strings,
 and error paths. The smoke test installs the module and bridge
 into a prefix and verifies that `require("polars")` finds the bridge without
 `POLARS_LUA_LIB`.
@@ -260,10 +262,16 @@ df:estimated_size()       -- approximate bytes
 df:max_chunks()
 df:rechunk()
 df:shrink_to_fit()
+df:count()
+df:count("score")
 df:sum("score")
 df:mean("score")
+df:std("score")
+df:var("score")
 df:min("score")
 df:max("score")
+df:median("score")
+df:quantile("score", 0.5)
 df:is_sorted("score", false)
 df:transpose({ keep_names_as = "field" })
 df:unnest("meta", "_")

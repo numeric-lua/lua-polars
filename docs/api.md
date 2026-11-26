@@ -917,9 +917,56 @@ local highest = df:max("score")
 local last_name = df:max("name")
 ```
 
-Non-string, empty, or unknown column names and closed frames are errors. A
-Polars type error is surfaced when an aggregate is not supported for the
-column's dtype.
+### `df:count([column]) -> integer`
+
+Without an argument returns the row count. With one column name returns the
+number of non-null values in that column. An empty frame returns `0`.
+
+```lua
+local rows = df:count()
+local scored = df:count("score")
+```
+
+### `df:std(column) -> number|nil`
+
+Returns the sample standard deviation of one numeric column. Nulls are
+ignored; no values returns `polars.null`.
+
+```lua
+local spread = df:std("score")
+```
+
+### `df:var(column) -> number|nil`
+
+Returns the sample variance of one numeric column with the same null handling
+as `std`.
+
+```lua
+local variance = df:var("score")
+```
+
+### `df:median(column) -> value|nil`
+
+Returns the median of one orderable column. No values returns `polars.null`.
+
+```lua
+local middle = df:median("score")
+```
+
+### `df:quantile(column, probability) -> number|nil`
+
+Returns the continuous quantile for a probability in `[0, 1]` for one numeric
+column. `0` and `1` return the minimum and maximum; no values returns
+`polars.null`.
+
+```lua
+local median = df:quantile("score", 0.5)
+local upper = df:quantile("score", 0.9)
+```
+
+Non-string, empty, or unknown column names, non-numeric or out-of-range
+probabilities, and closed frames are errors. A Polars type error is surfaced
+when an aggregate is not supported for the column's dtype.
 
 ### `df:drop(...) -> DataFrame`
 
