@@ -1863,6 +1863,12 @@ local function marker_frame(frame, name, condition, label)
     " THEN true ELSE false END AS " .. quote_identifier(name) .. " FROM df")
 end
 
+local function append_expression(frame, name, expression, label)
+  name = marker_column(frame, name, label)
+  return frame:sql("SELECT *, " .. expression .. " AS " ..
+    quote_identifier(name) .. " FROM df")
+end
+
 -- True when a string column contains a non-empty literal substring.
 function DataFrame:contains(column, needle, name)
   local source = string_marker_column(self, column, "contains")
@@ -1937,6 +1943,63 @@ function DataFrame:between(column, lower, upper, name)
   local condition = quote_identifier(source) .. " BETWEEN " ..
     string.format("%.17g", lower) .. " AND " .. string.format("%.17g", upper)
   return marker_frame(self, name, condition, "between")
+end
+
+-- Appends the first non-null value across the selected columns.
+function DataFrame:coalesce(columns, name)
+  local selected = subset_columns(self, columns, "coalesce")
+  if selected == nil then
+    error("coalesce columns must be a column name or a list of names", 2)
+  end
+  local quoted = {}
+  for index, column in ipairs(selected) do
+    quoted[index] = quote_identifier(column)
+  end
+  return append_expression(self, name,
+    "COALESCE(" .. table.concat(quoted, ", ") .. ")", "coalesce")
+end
+
+-- Appends the concatenation of the selected columns with a literal separator.
+function DataFrame:concat_str(columns, separator, name)
+  if type(separator) ~= "string" then
+    error("concat_str separator must be a string", 2)
+  end
+  local selected = subset_columns(self, columns, "concat_str")
+  if selected == nil then
+    error("concat_str columns must be a column name or a list of names", 2)
+  end
+  local literal = separator == "" and nil or
+    sql_scalar_literal(separator, "concat_str separator")
+  local parts = {}
+  for index, column in ipairs(selected) do
+    if index > 1 and literal ~= nil then
+      parts[#parts + 1] = literal
+    end
+    parts[#parts + 1] = quote_identifier(column)
+  end
+  return append_expression(self, name,
+    "CONCAT(" .. table.concat(parts, ", ") .. ")", "concat_str")
+end
+
+-- Appends the lowercase form of a string column.
+function DataFrame:lower(column, name)
+  local source = string_marker_column(self, column, "lower")
+  return append_expression(self, name,
+    "LOWER(" .. quote_identifier(source) .. ")", "lower")
+end
+
+-- Appends the uppercase form of a string column.
+function DataFrame:upper(column, name)
+  local source = string_marker_column(self, column, "upper")
+  return append_expression(self, name,
+    "UPPER(" .. quote_identifier(source) .. ")", "upper")
+end
+
+-- Appends the character length of a string column.
+function DataFrame:length(column, name)
+  local source = string_marker_column(self, column, "length")
+  return append_expression(self, name,
+    "LENGTH(" .. quote_identifier(source) .. ")", "length")
 end
 
 -- Distinct full rows with no argument, or distinct non-null values in a column.

@@ -1150,6 +1150,62 @@ Non-string or wrong-dtype source columns, empty match literals, malformed or
 empty value lists, non-scalar membership values, non-numeric columns, invalid
 range bounds, empty or colliding marker names, and closed frames are errors.
 
+### `df:coalesce(columns [, name]) -> DataFrame`
+
+Appends a column named `name` (default `"coalesce"`) with the first non-null
+value across the selected columns for each row. `columns` is a name or
+non-empty contiguous list. The input frame is unchanged.
+
+```lua
+local filled = df:coalesce({ "preferred_name", "name" }, "display_name")
+```
+
+All-selected-null rows produce null. Unknown or malformed column lists,
+incompatible types reported by Polars, colliding names, and closed frames are
+errors.
+
+### `df:concat_str(columns, separator [, name]) -> DataFrame`
+
+Appends a string column named `name` (default `"concat_str"`) containing the
+selected columns joined by the literal `separator`. An empty separator is
+allowed. `columns` is a name or non-empty contiguous list.
+
+```lua
+local label = df:concat_str({ "name", "team" }, "-", "label")
+```
+
+A null input value produces a null result. Unknown or malformed column lists,
+non-string or NUL separators, colliding names, and closed frames are errors.
+
+### `df:lower(column [, name]) -> DataFrame`
+
+Appends a lowercase copy of a `str` column named `name` (default `"lower"`).
+Null values stay null.
+
+```lua
+local lowered = df:lower("name")
+```
+
+### `df:upper(column [, name]) -> DataFrame`
+
+Appends an uppercase copy of a `str` column named `name` (default `"upper"`).
+
+```lua
+local uppercased = df:upper("name", "shout")
+```
+
+### `df:length(column [, name]) -> DataFrame`
+
+Appends the character length of a `str` column named `name` (default
+`"length"`). Null values stay null.
+
+```lua
+local lengths = df:length("name")
+```
+
+Non-string, empty, or unknown source columns, non-`str` dtypes, empty or
+colliding output names, and closed frames are errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name

@@ -131,7 +131,20 @@
   literals, malformed or empty value lists, non-scalar membership values,
   non-numeric ranges, invalid bounds, colliding or empty marker names, and
   closed frames;
-- `./scripts/test.sh` passes 217 tests; `./scripts/smoke.sh` and
+- five more DataFrame additions:
+  - `df:coalesce(columns [, name])` appends the first non-null value across
+    selected columns;
+  - `df:concat_str(columns, separator [, name])` appends a literal-separated
+    string concatenation;
+  - `df:lower(column [, name])`, `df:upper(column [, name])`, and
+    `df:length(column [, name])` append lowercase, uppercase, and character
+    length columns;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers malformed or unknown coalesce/concat column lists,
+  non-string separators, NUL separators, non-string source columns, colliding
+  or empty output names, and closed frames;
+- `./scripts/test.sh` passes 219 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 
