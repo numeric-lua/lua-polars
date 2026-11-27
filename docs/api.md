@@ -1174,8 +1174,9 @@ allowed. `columns` is a name or non-empty contiguous list.
 local label = df:concat_str({ "name", "team" }, "-", "label")
 ```
 
-A null input value produces a null result. Unknown or malformed column lists,
-non-string or NUL separators, colliding names, and closed frames are errors.
+Null input values are treated as empty strings, so the separators still appear
+in the result. Unknown or malformed column lists, non-string or NUL separators,
+colliding names, and closed frames are errors.
 
 ### `df:lower(column [, name]) -> DataFrame`
 
