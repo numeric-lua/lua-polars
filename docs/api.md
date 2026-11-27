@@ -1258,6 +1258,52 @@ Non-string or unknown source columns, non-`str` dtypes, empty or non-string
 replacement values, non-positive or fractional starts, negative lengths,
 empty or colliding output names, and closed frames are errors.
 
+### `df:abs(column [, name]) -> DataFrame`
+
+Appends the absolute value of a numeric column named `name` (default `"abs"`).
+Null values stay null.
+
+```lua
+local magnitudes = df:abs("score")
+```
+
+### `df:round(column, decimals [, name]) -> DataFrame`
+
+Appends a rounded numeric column named `name` (default `"round"`).
+`decimals` must be a non-negative integer. Null values stay null.
+
+```lua
+local rounded = df:round("score", 1)
+```
+
+### `df:floor(column [, name]) -> DataFrame`
+
+Appends the floor of a numeric column named `name` (default `"floor"`).
+
+```lua
+local floored = df:floor("score")
+```
+
+### `df:ceil(column [, name]) -> DataFrame`
+
+Appends the ceiling of a numeric column named `name` (default `"ceil"`).
+
+```lua
+local ceiled = df:ceil("score")
+```
+
+### `df:sign(column [, name]) -> DataFrame`
+
+Appends the sign (`-1`, `0`, or `1`) of a numeric column named `name` (default
+`"sign"`).
+
+```lua
+local signed = df:sign("score")
+```
+
+Non-numeric or unknown source columns, negative or fractional decimal counts,
+empty or colliding output names, and closed frames are errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name

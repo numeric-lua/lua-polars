@@ -156,7 +156,17 @@
 - validation covers non-string columns, empty or non-string replacement
   values, non-positive or fractional substring offsets, negative lengths,
   colliding output names, and closed frames;
-- `./scripts/test.sh` passes 221 tests; `./scripts/smoke.sh` and
+- five more numeric transform additions:
+  - `df:abs(column [, name])`, `df:floor(column [, name])`,
+    `df:ceil(column [, name])`, and `df:sign(column [, name])` append derived
+    numeric columns;
+  - `df:round(column, decimals [, name])` appends a rounded column with a
+    non-negative decimal count;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers non-numeric or unknown columns, negative or fractional
+  decimal counts, colliding output names, and closed frames;
+- `./scripts/test.sh` passes 223 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

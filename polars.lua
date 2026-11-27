@@ -1635,6 +1635,19 @@ local function boolean_column_name(frame, column, label)
   return name
 end
 
+local function numeric_column_name(frame, column, label)
+  if type(column) ~= "string" or column == "" then
+    error(label .. " column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(frame, column, label)
+  local name = selected[1]
+  local dtype = frame:schema()[name]
+  if type(dtype) ~= "string" or not dtype:match("^[iuf]%d+$") then
+    error(label .. " column must be numeric", 2)
+  end
+  return name
+end
+
 -- Scalar sum of a numeric column; null when no values are present.
 function DataFrame:sum(column)
   return aggregate_value(self, column, "SUM", "sum")
@@ -2057,6 +2070,45 @@ function DataFrame:substr(column, start, length, name)
   return append_expression(self, name,
     "SUBSTR(" .. quote_identifier(source) .. ", " .. tostring(start) .. ", " ..
     tostring(length) .. ")", "substr")
+end
+
+local function single_numeric_expression(self, column, function_name, label,
+    name)
+  local source = numeric_column_name(self, column, label)
+  return append_expression(self, name,
+    function_name .. "(" .. quote_identifier(source) .. ")", label)
+end
+
+-- Appends the absolute value of a numeric column.
+function DataFrame:abs(column, name)
+  return single_numeric_expression(self, column, "ABS", "abs", name)
+end
+
+-- Appends a rounded numeric column with a non-negative decimal count.
+function DataFrame:round(column, decimals, name)
+  local source = numeric_column_name(self, column, "round")
+  if type(decimals) ~= "number" or decimals % 1 ~= 0 or decimals < 0 or
+      decimals > MAX_SAFE_INTEGER then
+    error("round decimals must be a non-negative integer", 2)
+  end
+  return append_expression(self, name,
+    "ROUND(" .. quote_identifier(source) .. ", " .. tostring(decimals) .. ")",
+    "round")
+end
+
+-- Appends the floor of a numeric column.
+function DataFrame:floor(column, name)
+  return single_numeric_expression(self, column, "FLOOR", "floor", name)
+end
+
+-- Appends the ceiling of a numeric column.
+function DataFrame:ceil(column, name)
+  return single_numeric_expression(self, column, "CEIL", "ceil", name)
+end
+
+-- Appends the sign of a numeric column.
+function DataFrame:sign(column, name)
+  return single_numeric_expression(self, column, "SIGN", "sign", name)
 end
 
 -- Distinct full rows with no argument, or distinct non-null values in a column.

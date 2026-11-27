@@ -5211,6 +5211,79 @@ test("string transform helpers reject invalid arguments", function()
   truthy(tostring(err):find("closed", 1, true), "closed trim error")
 end)
 
+test("numeric transform helpers append derived columns", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("value\n1.234\n-2.345\n")
+  file:close()
+  local df = polars.read_csv(path)
+  local absolute = df:abs("value")
+  truthy(math.abs(absolute:to_table()[1].abs - 1.234) < 1e-12,
+    "unexpected abs value")
+  truthy(math.abs(absolute:to_table()[2].abs - 2.345) < 1e-12,
+    "unexpected negative abs value")
+  absolute:close()
+
+  local rounded = df:round("value", 2, "short")
+  truthy(math.abs(rounded:to_table()[1].short - 1.23) < 1e-12,
+    "unexpected round value")
+  truthy(math.abs(rounded:to_table()[2].short + 2.35) < 1e-12,
+    "unexpected negative round value")
+  rounded:close()
+
+  local floored = df:floor("value")
+  eq(floored:to_table()[1].floor, 1)
+  eq(floored:to_table()[2].floor, -3)
+  floored:close()
+  local ceiled = df:ceil("value")
+  eq(ceiled:to_table()[1].ceil, 2)
+  eq(ceiled:to_table()[2].ceil, -2)
+  ceiled:close()
+  local signed = df:sign("value")
+  eq(signed:to_table()[1].sign, 1)
+  eq(signed:to_table()[2].sign, -1)
+  signed:close()
+  df:close()
+end)
+
+test("numeric transform helpers reject invalid arguments", function()
+  local df = polars.read_csv(fixture)
+  for _, method in ipairs({ "abs", "round", "floor", "ceil", "sign" }) do
+    local ok, err = pcall(function() df[method](df, "name") end)
+    eq(ok, false, method .. " accepted a string column")
+    truthy(tostring(err):find("must be numeric", 1, true),
+      method .. " dtype error: " .. tostring(err))
+  end
+  for _, method in ipairs({ "abs", "floor", "ceil", "sign" }) do
+    local ok, err = pcall(function() df[method](df, "score", "score") end)
+    eq(ok, false, method .. " accepted a colliding output")
+    truthy(tostring(err):find("already exists", 1, true),
+      method .. " collision error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:round("score", 1, "score") end)
+  eq(ok, false, "round accepted a colliding output")
+  truthy(tostring(err):find("already exists", 1, true),
+    "round collision error: " .. tostring(err))
+  local cases = { -1, 1.5, "2" }
+  for _, value in ipairs(cases) do
+    local ok, err = pcall(function() df:round("score", value) end)
+    eq(ok, false, "round accepted invalid decimals")
+    truthy(tostring(err):find("non-negative integer", 1, true),
+      "round decimals error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:abs("missing") end)
+  eq(ok, false, "abs accepted an unknown column")
+  truthy(tostring(err):find("is not a column", 1, true),
+    "abs unknown error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:abs("score") end)
+  eq(ok, false, "closed abs accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed abs error")
+  ok, err = pcall(function() df:round("score", 1) end)
+  eq(ok, false, "closed round accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed round error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()
