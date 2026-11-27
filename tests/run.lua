@@ -5284,6 +5284,73 @@ test("numeric transform helpers reject invalid arguments", function()
   truthy(tostring(err):find("closed", 1, true), "closed round error")
 end)
 
+test("date part helpers append calendar and clock columns", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("d,dt\n2024-01-02,2024-01-02 03:04:05\n" ..
+    "2025-12-31,2025-12-31 23:59:59\n")
+  file:close()
+  local df = polars.read_csv(path, { try_parse_dates = true })
+  local years = df:year("d")
+  eq(years:columns()[3], "year")
+  eq(years:to_table()[1].year, 2024)
+  eq(years:to_table()[2].year, 2025)
+  years:close()
+  local months = df:month("dt", "month_value")
+  eq(months:to_table()[1].month_value, 1)
+  eq(months:to_table()[2].month_value, 12)
+  months:close()
+  local days = df:day("d")
+  eq(days:to_table()[1].day, 2)
+  eq(days:to_table()[2].day, 31)
+  days:close()
+  local hours = df:hour("dt")
+  eq(hours:to_table()[1].hour, 3)
+  eq(hours:to_table()[2].hour, 23)
+  hours:close()
+  local minutes = df:minute("dt")
+  eq(minutes:to_table()[1].minute, 4)
+  eq(minutes:to_table()[2].minute, 59)
+  minutes:close()
+  df:close()
+end)
+
+test("date part helpers reject invalid arguments", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("d,dt,n\n2024-01-02,2024-01-02 03:04:05,1\n")
+  file:close()
+  local df = polars.read_csv(path, { try_parse_dates = true })
+  for _, method in ipairs({ "year", "month", "day", "hour", "minute" }) do
+    local ok, err = pcall(function() df[method](df, "n") end)
+    eq(ok, false, method .. " accepted a numeric column")
+    truthy(tostring(err):find("dtype", 1, true),
+      method .. " dtype error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:hour("d") end)
+  eq(ok, false, "hour accepted a date column")
+  truthy(tostring(err):find("datetime dtype", 1, true),
+    "hour date error: " .. tostring(err))
+  ok, err = pcall(function() df:minute("d") end)
+  eq(ok, false, "minute accepted a date column")
+  truthy(tostring(err):find("datetime dtype", 1, true),
+    "minute date error: " .. tostring(err))
+  for _, method in ipairs({ "year", "month", "day", "hour", "minute" }) do
+    local collided, collision = pcall(function() df[method](df, "dt", "dt") end)
+    eq(collided, false, method .. " accepted a colliding output")
+    truthy(tostring(collision):find("already exists", 1, true),
+      method .. " collision error: " .. tostring(collision))
+  end
+  ok, err = pcall(function() df:year("missing") end)
+  eq(ok, false, "year accepted an unknown column")
+  truthy(tostring(err):find("is not a column", 1, true),
+    "year unknown error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:year("d") end)
+  eq(ok, false, "closed year accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed year error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

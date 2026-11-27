@@ -1648,6 +1648,22 @@ local function numeric_column_name(frame, column, label)
   return name
 end
 
+local function temporal_column_name(frame, column, label, datetime_only)
+  if type(column) ~= "string" or column == "" then
+    error(label .. " column must be a non-empty string", 2)
+  end
+  local selected = subset_columns(frame, column, label)
+  local name = selected[1]
+  local dtype = frame:schema()[name]
+  local is_date = dtype == "date"
+  local is_datetime = type(dtype) == "string" and dtype:match("^datetime") ~= nil
+  if not (is_date or is_datetime) or (datetime_only and not is_datetime) then
+    error(label .. " column must have " ..
+      (datetime_only and "datetime" or "date or datetime") .. " dtype", 2)
+  end
+  return name
+end
+
 -- Scalar sum of a numeric column; null when no values are present.
 function DataFrame:sum(column)
   return aggregate_value(self, column, "SUM", "sum")
@@ -2109,6 +2125,38 @@ end
 -- Appends the sign of a numeric column.
 function DataFrame:sign(column, name)
   return single_numeric_expression(self, column, "SIGN", "sign", name)
+end
+
+local function date_part_expression(self, column, part, label, name,
+    datetime_only)
+  local source = temporal_column_name(self, column, label, datetime_only)
+  return append_expression(self, name,
+    "DATE_PART('" .. part .. "', " .. quote_identifier(source) .. ")", label)
+end
+
+-- Appends the year of a date or datetime column.
+function DataFrame:year(column, name)
+  return date_part_expression(self, column, "year", "year", name, false)
+end
+
+-- Appends the month of a date or datetime column.
+function DataFrame:month(column, name)
+  return date_part_expression(self, column, "month", "month", name, false)
+end
+
+-- Appends the day of a date or datetime column.
+function DataFrame:day(column, name)
+  return date_part_expression(self, column, "day", "day", name, false)
+end
+
+-- Appends the hour of a datetime column.
+function DataFrame:hour(column, name)
+  return date_part_expression(self, column, "hour", "hour", name, true)
+end
+
+-- Appends the minute of a datetime column.
+function DataFrame:minute(column, name)
+  return date_part_expression(self, column, "minute", "minute", name, true)
 end
 
 -- Distinct full rows with no argument, or distinct non-null values in a column.

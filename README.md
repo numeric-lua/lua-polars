@@ -77,8 +77,9 @@ end
   `contains`/`starts_with`/`ends_with`/`is_in`/`between` Boolean markers,
   `coalesce`/`concat_str`/`lower`/`upper`/`length`/`trim`/`ltrim`/`rtrim`/
   `replace_str`/`substr`/`abs`/`round`/`floor`/`ceil`/`sign` derived columns,
-  `top_k`/`bottom_k`, group-by, `value_counts`, drop, rename, and with-columns
-  that preserve column order
+  `year`/`month`/`day`/`hour`/`minute` date/time parts, `top_k`/`bottom_k`,
+  group-by, `value_counts`, drop, rename, and with-columns that preserve
+  column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more
   keys, plus row-wise `concat(other)` and column-wise `hstack(other)`
 - row-oriented `to_table()`, `to_json([options])` for compact, pretty, or JSON
@@ -162,8 +163,8 @@ statistical aggregates and quantiles, distinct counts, first/last values,
 products, correlations and covariances, boolean any/all, scalar replacement,
 membership filtering, string/range predicate markers, coalesced, trimmed,
 replaced, substring, absolute, rounded, floored, ceiled, and signed columns,
-row/column stacking, schema, estimated size, chunk counts, rechunking,
-shrinking,
+calendar and clock extraction, row/column stacking, schema, estimated size,
+chunk counts, rechunking, shrinking,
 head, tail, slice, row indexing, projection, row reversal, transpose,
 sortedness checks, cumulative transforms, struct unnest, strict casting, subset
 distinct rows, list-column explode, filtering, sorting with null placement,
@@ -317,6 +318,11 @@ df:round("score", 1)
 df:floor("score")
 df:ceil("score")
 df:sign("score")
+df:year("day")
+df:month("day")
+df:day("day")
+df:hour("stamp")
+df:minute("stamp")
 df:is_sorted("score", false)
 df:transpose({ keep_names_as = "field" })
 df:unnest("meta", "_")

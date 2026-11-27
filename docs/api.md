@@ -1304,6 +1304,54 @@ local signed = df:sign("score")
 Non-numeric or unknown source columns, negative or fractional decimal counts,
 empty or colliding output names, and closed frames are errors.
 
+### `df:year(column [, name]) -> DataFrame`
+
+Appends the year of a `date` or `datetime` column named `name` (default
+`"year"`). Null values stay null.
+
+```lua
+local years = df:year("day")
+```
+
+### `df:month(column [, name]) -> DataFrame`
+
+Appends the month of a `date` or `datetime` column named `name` (default
+`"month"`).
+
+```lua
+local months = df:month("day")
+```
+
+### `df:day(column [, name]) -> DataFrame`
+
+Appends the day of a `date` or `datetime` column named `name` (default
+`"day"`).
+
+```lua
+local days = df:day("day")
+```
+
+### `df:hour(column [, name]) -> DataFrame`
+
+Appends the hour of a `datetime` column named `name` (default `"hour"`).
+Date-only columns are rejected.
+
+```lua
+local hours = df:hour("stamp")
+```
+
+### `df:minute(column [, name]) -> DataFrame`
+
+Appends the minute of a `datetime` column named `name` (default `"minute"`).
+Date-only columns are rejected.
+
+```lua
+local minutes = df:minute("stamp")
+```
+
+Non-temporal or unknown source columns, clock parts requested from date-only
+columns, empty or colliding output names, and closed frames are errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name
