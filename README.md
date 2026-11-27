@@ -75,9 +75,9 @@ end
   `quantile`/`n_unique`/`first`/`last`/`product`/`corr`/`covar`/`covar_pop`,
   `any`/`all`, scalar `replace`, `filter_in`/`filter_not_in`,
   `contains`/`starts_with`/`ends_with`/`is_in`/`between` Boolean markers,
-  `coalesce`/`concat_str`/`lower`/`upper`/`length` derived columns,
-  `top_k`/`bottom_k`, group-by, `value_counts`, drop, rename, and with-columns
-  that preserve column order
+  `coalesce`/`concat_str`/`lower`/`upper`/`length`/`trim`/`ltrim`/`rtrim`/
+  `replace_str`/`substr` derived columns, `top_k`/`bottom_k`, group-by,
+  `value_counts`, drop, rename, and with-columns that preserve column order
 - eager inner, left, full/outer, semi, anti, and cross joins on one or more
   keys, plus row-wise `concat(other)` and column-wise `hstack(other)`
 - row-oriented `to_table()`, `to_json([options])` for compact, pretty, or JSON
@@ -159,9 +159,9 @@ Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
 CSV low-memory and rechunked reads and CSV text output, scalar counts,
 statistical aggregates and quantiles, distinct counts, first/last values,
 products, correlations and covariances, boolean any/all, scalar replacement,
-membership filtering, string/range predicate markers, coalesced and derived
-string columns, row/column stacking, schema, estimated size, chunk counts,
-rechunking, shrinking,
+membership filtering, string/range predicate markers, coalesced, trimmed,
+replaced, and substring-derived columns, row/column stacking, schema, estimated
+size, chunk counts, rechunking, shrinking,
 head, tail, slice, row indexing, projection, row reversal, transpose,
 sortedness checks, cumulative transforms, struct unnest, strict casting, subset
 distinct rows, list-column explode, filtering, sorting with null placement,
@@ -305,6 +305,11 @@ df:concat_str({ "name", "team" }, "-")
 df:lower("name")
 df:upper("name")
 df:length("name")
+df:trim("name")
+df:ltrim("name")
+df:rtrim("name")
+df:replace_str("name", "a", "A")
+df:substr("name", 2, 2)
 df:is_sorted("score", false)
 df:transpose({ keep_names_as = "field" })
 df:unnest("meta", "_")

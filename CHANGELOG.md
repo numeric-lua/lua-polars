@@ -144,7 +144,19 @@
 - validation covers malformed or unknown coalesce/concat column lists,
   non-string separators, NUL separators, non-string source columns, colliding
   or empty output names, and closed frames;
-- `./scripts/test.sh` passes 219 tests; `./scripts/smoke.sh` and
+- five more string transform additions:
+  - `df:trim(column [, name])`, `df:ltrim(column [, name])`, and
+    `df:rtrim(column [, name])` append whitespace-trimmed columns;
+  - `df:replace_str(column, old, new [, name])` appends a literal substring
+    replacement column;
+  - `df:substr(column, start, length [, name])` appends a 1-based character
+    substring column;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers non-string columns, empty or non-string replacement
+  values, non-positive or fractional substring offsets, negative lengths,
+  colliding output names, and closed frames;
+- `./scripts/test.sh` passes 221 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

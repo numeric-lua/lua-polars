@@ -1207,6 +1207,57 @@ local lengths = df:length("name")
 Non-string, empty, or unknown source columns, non-`str` dtypes, empty or
 colliding output names, and closed frames are errors.
 
+### `df:trim(column [, name]) -> DataFrame`
+
+Appends whitespace-trimmed values from a `str` column named `name` (default
+`"trim"`). Null values stay null.
+
+```lua
+local cleaned = df:trim("name")
+```
+
+### `df:ltrim(column [, name]) -> DataFrame`
+
+Appends left-trimmed values from a `str` column named `name` (default
+`"ltrim"`). Null values stay null.
+
+```lua
+local cleaned = df:ltrim("name")
+```
+
+### `df:rtrim(column [, name]) -> DataFrame`
+
+Appends right-trimmed values from a `str` column named `name` (default
+`"rtrim"`). Null values stay null.
+
+```lua
+local cleaned = df:rtrim("name")
+```
+
+### `df:replace_str(column, old, new [, name]) -> DataFrame`
+
+Appends a `str` column named `name` (default `"replace_str"`) replacing every
+literal occurrence of the non-empty `old` string with `new`. `new` may be
+empty. Null source values stay null.
+
+```lua
+local renamed = df:replace_str("name", "a", "A")
+```
+
+### `df:substr(column, start, length [, name]) -> DataFrame`
+
+Appends a `str` column named `name` (default `"substr"`) containing the
+1-based character substring beginning at `start` with `length` characters.
+`length` may be `0`; null source values stay null.
+
+```lua
+local middle = df:substr("name", 2, 2)
+```
+
+Non-string or unknown source columns, non-`str` dtypes, empty or non-string
+replacement values, non-positive or fractional starts, negative lengths,
+empty or colliding output names, and closed frames are errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name

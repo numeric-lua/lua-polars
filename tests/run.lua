@@ -5129,6 +5129,88 @@ test("column expression helpers reject invalid arguments", function()
   truthy(tostring(err):find("closed", 1, true), "closed coalesce error")
 end)
 
+test("trim, replace_str, and substr append string columns", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("value\n  ana  \nxxanaxx\nana\n")
+  file:close()
+  local df = polars.read_csv(path)
+  local trimmed = df:trim("value")
+  eq(trimmed:columns()[2], "trim")
+  eq(trimmed:to_table()[1].trim, "ana")
+  trimmed:close()
+  local left = df:ltrim("value", "left")
+  eq(left:to_table()[1].left, "ana  ")
+  left:close()
+  local right = df:rtrim("value")
+  eq(right:to_table()[1].rtrim, "  ana")
+  right:close()
+
+  local replaced = df:replace_str("value", "ana", "ANA")
+  eq(replaced:to_table()[1].replace_str, "  ANA  ")
+  eq(replaced:to_table()[2].replace_str, "xxANAxx")
+  replaced:close()
+  local middle = df:substr("value", 2, 2)
+  eq(middle:to_table()[1].substr, " a")
+  eq(middle:to_table()[3].substr, "na")
+  middle:close()
+  local empty = df:substr("value", 2, 0)
+  eq(empty:to_table()[1].substr, "")
+  empty:close()
+  df:close()
+end)
+
+test("string transform helpers reject invalid arguments", function()
+  local df = polars.read_csv(fixture)
+  for _, method in ipairs({ "trim", "ltrim", "rtrim", "replace_str",
+      "substr" }) do
+    local ok, err = pcall(function() df[method](df, "score") end)
+    eq(ok, false, method .. " accepted a numeric column")
+    truthy(tostring(err):find("str dtype", 1, true),
+      method .. " dtype error: " .. tostring(err))
+  end
+  for _, method in ipairs({ "trim", "ltrim", "rtrim" }) do
+    local ok, err = pcall(function() df[method](df, "name", "name") end)
+    eq(ok, false, method .. " accepted a colliding output")
+    truthy(tostring(err):find("already exists", 1, true),
+      method .. " collision error: " .. tostring(err))
+  end
+  local ok, err = pcall(function()
+    df:replace_str("name", "a", "A", "name")
+  end)
+  eq(ok, false, "replace_str accepted a colliding output")
+  truthy(tostring(err):find("already exists", 1, true),
+    "replace_str collision error: " .. tostring(err))
+  ok, err = pcall(function() df:substr("name", 1, 1, "name") end)
+  eq(ok, false, "substr accepted a colliding output")
+  truthy(tostring(err):find("already exists", 1, true),
+    "substr collision error: " .. tostring(err))
+  local ok, err = pcall(function() df:replace_str("name", "", "x") end)
+  eq(ok, false, "replace_str accepted an empty old value")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "replace_str old error: " .. tostring(err))
+  ok, err = pcall(function() df:replace_str("name", "a", 42) end)
+  eq(ok, false, "replace_str accepted a non-string new value")
+  truthy(tostring(err):find("must be a string", 1, true),
+    "replace_str new error: " .. tostring(err))
+  ok, err = pcall(function() df:substr("name", 0, 1) end)
+  eq(ok, false, "substr accepted a zero start")
+  truthy(tostring(err):find("at least 1", 1, true),
+    "substr start error: " .. tostring(err))
+  ok, err = pcall(function() df:substr("name", 1, -1) end)
+  eq(ok, false, "substr accepted a negative length")
+  truthy(tostring(err):find("non-negative", 1, true),
+    "substr length error: " .. tostring(err))
+  ok, err = pcall(function() df:substr("name", 1.5, 1) end)
+  eq(ok, false, "substr accepted a fractional start")
+  truthy(tostring(err):find("must be an integer", 1, true),
+    "substr fractional error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:trim("name") end)
+  eq(ok, false, "closed trim accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed trim error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

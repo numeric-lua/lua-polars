@@ -2002,6 +2002,63 @@ function DataFrame:length(column, name)
     "LENGTH(" .. quote_identifier(source) .. ")", "length")
 end
 
+local function single_string_expression(self, column, function_name, label, name)
+  local source = string_marker_column(self, column, label)
+  return append_expression(self, name,
+    function_name .. "(" .. quote_identifier(source) .. ")", label)
+end
+
+-- Appends whitespace-trimmed values from a string column.
+function DataFrame:trim(column, name)
+  return single_string_expression(self, column, "TRIM", "trim", name)
+end
+
+-- Appends left-trimmed values from a string column.
+function DataFrame:ltrim(column, name)
+  return single_string_expression(self, column, "LTRIM", "ltrim", name)
+end
+
+-- Appends right-trimmed values from a string column.
+function DataFrame:rtrim(column, name)
+  return single_string_expression(self, column, "RTRIM", "rtrim", name)
+end
+
+-- Appends a string column with literal substring replacements.
+function DataFrame:replace_str(column, old, new, name)
+  local source = string_marker_column(self, column, "replace_str")
+  if type(old) ~= "string" or old == "" then
+    error("replace_str old value must be a non-empty string", 2)
+  end
+  if type(new) ~= "string" then
+    error("replace_str new value must be a string", 2)
+  end
+  local old_literal = sql_scalar_literal(old, "replace_str old value")
+  local new_literal = sql_scalar_literal(new, "replace_str new value")
+  return append_expression(self, name,
+    "REPLACE(" .. quote_identifier(source) .. ", " .. old_literal .. ", " ..
+    new_literal .. ")", "replace_str")
+end
+
+-- Appends a 1-based character substring from a string column.
+function DataFrame:substr(column, start, length, name)
+  local source = string_marker_column(self, column, "substr")
+  for label, value in pairs({ start = start, length = length }) do
+    if type(value) ~= "number" or value % 1 ~= 0 or
+        value > MAX_SAFE_INTEGER then
+      error("substr " .. label .. " must be an integer", 2)
+    end
+  end
+  if start < 1 then
+    error("substr start must be at least 1", 2)
+  end
+  if length < 0 then
+    error("substr length must be non-negative", 2)
+  end
+  return append_expression(self, name,
+    "SUBSTR(" .. quote_identifier(source) .. ", " .. tostring(start) .. ", " ..
+    tostring(length) .. ")", "substr")
+end
+
 -- Distinct full rows with no argument, or distinct non-null values in a column.
 function DataFrame:n_unique(column)
   if column == nil then
