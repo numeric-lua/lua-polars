@@ -205,7 +205,18 @@
   and preserve every earlier default;
 - validation covers non-numeric columns, non-finite scalars, zero divisors,
   colliding output names, unknown columns, and closed frames;
-- `./scripts/test.sh` passes 231 tests; `./scripts/smoke.sh` and
+- five more string formatting additions:
+  - `df:pad_left(column, width [, fill [, name]])` and
+    `df:pad_right(column, width [, fill [, name]])` append padded strings;
+  - `df:repeat_str(column, count [, name])` appends repeated strings;
+  - `df:reverse_str(column [, name])` appends reversed strings;
+  - `df:capitalize(column [, name])` appends first-letter-uppercase strings;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers non-string columns, non-positive or fractional widths,
+  empty fills, invalid repeat counts, colliding output names, and closed
+  frames;
+- `./scripts/test.sh` passes 233 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

@@ -77,7 +77,8 @@ end
   `contains`/`starts_with`/`ends_with`/`is_in`/`between` Boolean markers,
   `is_null`/`is_not_null`/`like`/`not_like`/`is_blank` predicates,
   `coalesce`/`concat_str`/`lower`/`upper`/`length`/`trim`/`ltrim`/`rtrim`/
-  `replace_str`/`substr`/`abs`/`round`/`floor`/`ceil`/`sign` and scalar
+  `replace_str`/`substr`/`pad_left`/`pad_right`/`repeat_str`/`reverse_str`/
+  `capitalize`/`abs`/`round`/`floor`/`ceil`/`sign` and scalar
   `add`/`subtract`/`multiply`/`divide`/`modulo` derived columns,
   `year`/`month`/`day`/`hour`/`minute`/`second` and
   `quarter`/`week`/`weekday`/`day_of_year` date/time parts, `top_k`/`bottom_k`,
@@ -165,10 +166,11 @@ CSV low-memory and rechunked reads and CSV text output, scalar counts,
 statistical aggregates and quantiles, distinct counts, first/last values,
 products, correlations and covariances, boolean any/all, scalar replacement,
 membership filtering, string/range/null/LIKE/blank predicate markers,
-coalesced, trimmed, replaced, substring, absolute, rounded, floored, ceiled,
-signed, and scalar-arithmetic columns, calendar, clock, quarter, week, weekday,
-ordinal-day, and second extraction, row/column stacking, schema, estimated
-size, chunk counts, rechunking, shrinking,
+coalesced, trimmed, replaced, substring, padded, repeated, reversed,
+capitalized, absolute, rounded, floored, ceiled, signed, and scalar-arithmetic
+columns, calendar, clock, quarter, week, weekday, ordinal-day, and second
+extraction, row/column stacking, schema, estimated size, chunk counts,
+rechunking, shrinking,
 head, tail, slice, row indexing, projection, row reversal, transpose,
 sortedness checks, cumulative transforms, struct unnest, strict casting, subset
 distinct rows, list-column explode, filtering, sorting with null placement,
@@ -332,6 +334,11 @@ df:subtract("score", 5)
 df:multiply("score", 3)
 df:divide("score", 2)
 df:modulo("score", 4)
+df:pad_left("name", 5, "x")
+df:pad_right("name", 5)
+df:repeat_str("name", 2)
+df:reverse_str("name")
+df:capitalize("name")
 df:year("day")
 df:month("day")
 df:day("day")

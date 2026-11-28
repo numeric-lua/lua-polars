@@ -2137,6 +2137,75 @@ function DataFrame:substr(column, start, length, name)
     tostring(length) .. ")", "substr")
 end
 
+local function pad_string(self, column, width, fill, left, name, label)
+  local source = string_marker_column(self, column, label)
+  if type(width) ~= "number" or width % 1 ~= 0 or width < 1 or
+      width > MAX_SAFE_INTEGER then
+    error(label .. " width must be a positive integer", 2)
+  end
+  if fill == nil then
+    fill = " "
+  end
+  if type(fill) ~= "string" or fill == "" then
+    error(label .. " fill must be a non-empty string", 2)
+  end
+  local function_name = left and "LPAD" or "RPAD"
+  return append_expression(self, name,
+    function_name .. "(" .. quote_identifier(source) .. ", " ..
+    tostring(width) .. ", " .. sql_scalar_literal(fill, label .. " fill") .. ")",
+    label)
+end
+
+-- Appends a left-padded string column.
+function DataFrame:pad_left(column, width, fill, name)
+  return pad_string(self, column, width, fill, true, name, "pad_left")
+end
+
+-- Appends a right-padded string column.
+function DataFrame:pad_right(column, width, fill, name)
+  return pad_string(self, column, width, fill, false, name, "pad_right")
+end
+
+-- Appends a string column repeated a fixed number of times.
+function DataFrame:repeat_str(column, count, name)
+  local source = string_marker_column(self, column, "repeat_str")
+  if type(count) ~= "number" or count % 1 ~= 0 or count < 0 or
+      count > 1000 then
+    error("repeat_str count must be an integer between 0 and 1000", 2)
+  end
+  local quoted = quote_identifier(source)
+  local repeated
+  if count == 0 then
+    repeated = "''"
+  else
+    local parts = {}
+    for index = 1, count do
+      parts[index] = quoted
+    end
+    repeated = "CONCAT(" .. table.concat(parts, ", ") .. ")"
+  end
+  return append_expression(self, name,
+    "CASE WHEN " .. quoted .. " IS NULL THEN NULL ELSE " .. repeated .. " END",
+    "repeat_str")
+end
+
+-- Appends a reversed string column.
+function DataFrame:reverse_str(column, name)
+  local source = string_marker_column(self, column, "reverse_str")
+  return append_expression(self, name,
+    "REVERSE(" .. quote_identifier(source) .. ")", "reverse_str")
+end
+
+-- Appends a column with the first character uppercased and the rest lowercased.
+function DataFrame:capitalize(column, name)
+  local source = string_marker_column(self, column, "capitalize")
+  local quoted = quote_identifier(source)
+  return append_expression(self, name,
+    "CASE WHEN " .. quoted .. " IS NULL THEN NULL ELSE CONCAT(" ..
+    "UPPER(SUBSTR(" .. quoted .. ", 1, 1)), LOWER(SUBSTR(" .. quoted ..
+    ", 2))) END", "capitalize")
+end
+
 local function single_numeric_expression(self, column, function_name, label,
     name)
   local source = numeric_column_name(self, column, label)

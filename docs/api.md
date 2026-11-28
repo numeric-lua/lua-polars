@@ -1311,6 +1311,58 @@ Non-string or unknown source columns, non-`str` dtypes, empty or non-string
 replacement values, non-positive or fractional starts, negative lengths,
 empty or colliding output names, and closed frames are errors.
 
+### `df:pad_left(column, width [, fill [, name]]) -> DataFrame`
+
+Appends a `str` column named `name` (default `"pad_left"`) padded on the left
+to `width` characters using `fill` (default a space). `width` must be a
+positive integer and `fill` a non-empty string.
+
+```lua
+local padded = df:pad_left("name", 5, "x")
+```
+
+### `df:pad_right(column, width [, fill [, name]]) -> DataFrame`
+
+Appends a right-padded `str` column named `name` (default `"pad_right"`) with
+the same validation as `pad_left`.
+
+```lua
+local padded = df:pad_right("name", 5)
+```
+
+### `df:repeat_str(column, count [, name]) -> DataFrame`
+
+Appends a `str` column named `name` (default `"repeat_str"`) repeating the
+source `count` times. `count` must be an integer from `0` through `1000`; zero
+produces an empty string.
+
+```lua
+local repeated = df:repeat_str("name", 2)
+```
+
+### `df:reverse_str(column [, name]) -> DataFrame`
+
+Appends a reversed `str` column named `name` (default `"reverse_str"`). Null
+values stay null.
+
+```lua
+local reversed = df:reverse_str("name")
+```
+
+### `df:capitalize(column [, name]) -> DataFrame`
+
+Appends a `str` column named `name` (default `"capitalize"`) with the first
+character uppercased and the remaining characters lowercased. Null values stay
+null.
+
+```lua
+local capitalized = df:capitalize("name")
+```
+
+Non-string or unknown source columns, non-`str` dtypes, non-positive or
+fractional widths, empty fills, invalid repeat counts, empty or colliding
+output names, and closed frames are errors.
+
 ### `df:abs(column [, name]) -> DataFrame`
 
 Appends the absolute value of a numeric column named `name` (default `"abs"`).

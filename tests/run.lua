@@ -5539,6 +5539,87 @@ test("scalar arithmetic helpers reject invalid arguments", function()
   truthy(tostring(err):find("closed", 1, true), "closed add error")
 end)
 
+test("padding, repeat, reverse, and capitalize append strings", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("s\nana\nANA\n\n x\n")
+  file:close()
+  local df = polars.read_csv(path)
+  local left = df:pad_left("s", 5, "x")
+  eq(left:columns()[2], "pad_left")
+  eq(left:to_table()[1].pad_left, "xxana")
+  left:close()
+  local right = df:pad_right("s", 5)
+  eq(right:to_table()[1].pad_right, "ana  ")
+  right:close()
+  local repeated = df:repeat_str("s", 2, "twice")
+  eq(repeated:to_table()[1].twice, "anaana")
+  eq(repeated:to_table()[2].twice, "ANAANA")
+  repeated:close()
+  local empty = df:repeat_str("s", 0)
+  eq(empty:to_table()[1].repeat_str, "")
+  empty:close()
+  local reversed = df:reverse_str("s")
+  eq(reversed:to_table()[1].reverse_str, "ana")
+  eq(reversed:to_table()[2].reverse_str, "ANA")
+  reversed:close()
+  local capitalized = df:capitalize("s")
+  eq(capitalized:to_table()[1].capitalize, "Ana")
+  eq(capitalized:to_table()[2].capitalize, "Ana")
+  eq(capitalized:to_table()[3].capitalize, polars.null)
+  capitalized:close()
+  df:close()
+end)
+
+test("string formatting helpers reject invalid arguments", function()
+  local df = polars.read_csv(fixture)
+  for _, method in ipairs({ "pad_left", "pad_right", "repeat_str",
+      "reverse_str", "capitalize" }) do
+    local ok, err = pcall(function() df[method](df, "score", 2) end)
+    eq(ok, false, method .. " accepted a numeric column")
+    truthy(tostring(err):find("str dtype", 1, true),
+      method .. " dtype error: " .. tostring(err))
+  end
+  for _, value in ipairs({ 0, 1.5, "5" }) do
+    local ok, err = pcall(function() df:pad_left("name", value) end)
+    eq(ok, false, "pad_left accepted invalid width")
+    truthy(tostring(err):find("positive integer", 1, true),
+      "pad width error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:pad_left("name", 5, "") end)
+  eq(ok, false, "pad_left accepted an empty fill")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "pad fill error: " .. tostring(err))
+  for _, value in ipairs({ -1, 1.5, 1001, "2" }) do
+    ok, err = pcall(function() df:repeat_str("name", value) end)
+    eq(ok, false, "repeat_str accepted invalid count")
+    truthy(tostring(err):find("between 0 and 1000", 1, true),
+      "repeat count error: " .. tostring(err))
+  end
+  for _, method in ipairs({ "pad_left", "pad_right" }) do
+    ok, err = pcall(function() df[method](df, "name", 5, "x", "name") end)
+    eq(ok, false, method .. " accepted a colliding output")
+    truthy(tostring(err):find("already exists", 1, true),
+      method .. " collision error: " .. tostring(err))
+  end
+  ok, err = pcall(function() df:repeat_str("name", 2, "name") end)
+  eq(ok, false, "repeat_str accepted a colliding output")
+  truthy(tostring(err):find("already exists", 1, true),
+    "repeat_str collision error: " .. tostring(err))
+  ok, err = pcall(function() df:reverse_str("name", "name") end)
+  eq(ok, false, "reverse_str accepted a colliding output")
+  truthy(tostring(err):find("already exists", 1, true),
+    "reverse_str collision error: " .. tostring(err))
+  ok, err = pcall(function() df:capitalize("name", "name") end)
+  eq(ok, false, "capitalize accepted a colliding output")
+  truthy(tostring(err):find("already exists", 1, true),
+    "capitalize collision error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:reverse_str("name") end)
+  eq(ok, false, "closed reverse_str accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed reverse_str error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()
