@@ -1150,6 +1150,59 @@ Non-string or wrong-dtype source columns, empty match literals, malformed or
 empty value lists, non-scalar membership values, non-numeric columns, invalid
 range bounds, empty or colliding marker names, and closed frames are errors.
 
+### `df:is_null(column [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"is_null"`) that is true when
+the column value is null. Any column dtype is accepted.
+
+```lua
+local missing = df:is_null("note")
+```
+
+### `df:is_not_null(column [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"is_not_null"`) that is true
+when the column value is not null. Any column dtype is accepted.
+
+```lua
+local present = df:is_not_null("note")
+```
+
+### `df:like(column, pattern [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"like"`) that is true when a
+`str` column matches the SQL `LIKE` `pattern`. `%` and `_` are wildcards; the
+match follows Polars' case-sensitive `LIKE` semantics. A null value produces
+false.
+
+```lua
+local marked = df:like("name", "a%")
+```
+
+### `df:not_like(column, pattern [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"not_like"`) that is true when
+a `str` column does not match the SQL `LIKE` `pattern`. A null value produces
+false.
+
+```lua
+local marked = df:not_like("name", "a%")
+```
+
+### `df:is_blank(column [, name]) -> DataFrame`
+
+Appends a Boolean marker named `name` (default `"is_blank"`) that is true when
+a `str` column is empty or contains only whitespace. A null value produces
+false.
+
+```lua
+local blank = df:is_blank("note")
+```
+
+Unknown or non-string columns, wrong dtypes for `like`/`not_like`/`is_blank`,
+non-string or NUL patterns, empty or colliding marker names, and closed frames
+are errors.
+
 ### `df:coalesce(columns [, name]) -> DataFrame`
 
 Appends a column named `name` (default `"coalesce"`) with the first non-null

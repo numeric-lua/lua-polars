@@ -5411,6 +5411,72 @@ test("extended date part helpers reject invalid arguments", function()
   truthy(tostring(err):find("closed", 1, true), "closed week error")
 end)
 
+test("null, LIKE, and blank predicates append markers", function()
+  local path = new_temp_path(".csv")
+  local file = assert(io.open(path, "w"))
+  file:write("s,v\nabc,1\n,2\n  ,3\nxyz,\n")
+  file:close()
+  local df = polars.read_csv(path)
+  local nulls = df:is_null("v")
+  eq(nulls:columns()[3], "is_null")
+  eq(nulls:to_table()[1].is_null, false)
+  eq(nulls:to_table()[4].is_null, true)
+  nulls:close()
+  local present = df:is_not_null("v", "present")
+  eq(present:to_table()[1].present, true)
+  eq(present:to_table()[4].present, false)
+  present:close()
+  local matching = df:like("s", "a%")
+  eq(matching:to_table()[1].like, true)
+  eq(matching:to_table()[2].like, false)
+  matching:close()
+  local other = df:not_like("s", "a%", "other")
+  eq(other:to_table()[1].other, false)
+  eq(other:to_table()[3].other, true)
+  other:close()
+  local blanks = df:is_blank("s")
+  eq(blanks:to_table()[1].is_blank, false)
+  eq(blanks:to_table()[3].is_blank, true)
+  blanks:close()
+  df:close()
+end)
+
+test("null, LIKE, and blank predicates reject invalid inputs", function()
+  local df = polars.read_csv(fixture)
+  local cases = {
+    { "is_null", { 42 }, "non-empty string" },
+    { "is_null", { "missing" }, "is not a column" },
+    { "is_not_null", { "" }, "non-empty string" },
+    { "like", { "score", "1" }, "str dtype" },
+    { "like", { "name", 42 }, "pattern must be a string" },
+    { "like", { "name", "a\0b" }, "must not contain NUL" },
+    { "not_like", { "name", false }, "pattern must be a string" },
+    { "is_blank", { "score" }, "str dtype" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = pcall(function() df[case[1]](df, unpack(case[2])) end)
+    eq(ok, false, case[1] .. " accepted invalid input")
+    truthy(tostring(err):find(case[3], 1, true),
+      "expected '" .. case[3] .. "' in: " .. tostring(err))
+  end
+  for _, method in ipairs({ "is_null", "is_not_null", "like", "not_like",
+      "is_blank" }) do
+    local ok, err
+    if method == "like" or method == "not_like" then
+      ok, err = pcall(function() df[method](df, "name", "%", "name") end)
+    else
+      ok, err = pcall(function() df[method](df, "name", "name") end)
+    end
+    eq(ok, false, method .. " accepted a colliding output")
+    truthy(tostring(err):find("already exists", 1, true),
+      method .. " collision error: " .. tostring(err))
+  end
+  df:close()
+  local ok, err = pcall(function() df:is_null("name") end)
+  eq(ok, false, "closed is_null accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed is_null error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

@@ -185,7 +185,18 @@
   and preserve every earlier default;
 - validation covers non-temporal or unknown columns, second extraction from
   date-only columns, colliding output names, and closed frames;
-- `./scripts/test.sh` passes 227 tests; `./scripts/smoke.sh` and
+- five more predicate additions:
+  - `df:is_null(column [, name])` and `df:is_not_null(column [, name])` append
+    null-state markers;
+  - `df:like(column, pattern [, name])` and
+    `df:not_like(column, pattern [, name])` append SQL `LIKE` markers;
+  - `df:is_blank(column [, name])` appends a marker that is true for empty or
+    whitespace-only strings;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers unknown or non-string columns, wrong dtypes, non-string or
+  NUL patterns, colliding marker names, and closed frames;
+- `./scripts/test.sh` passes 229 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

@@ -1974,6 +1974,55 @@ function DataFrame:between(column, lower, upper, name)
   return marker_frame(self, name, condition, "between")
 end
 
+-- True when a column value is null.
+function DataFrame:is_null(column, name)
+  if type(column) ~= "string" or column == "" then
+    error("is_null column must be a non-empty string", 2)
+  end
+  local source = subset_columns(self, column, "is_null")[1]
+  return marker_frame(self, name,
+    quote_identifier(source) .. " IS NULL", "is_null")
+end
+
+-- True when a column value is not null.
+function DataFrame:is_not_null(column, name)
+  if type(column) ~= "string" or column == "" then
+    error("is_not_null column must be a non-empty string", 2)
+  end
+  local source = subset_columns(self, column, "is_not_null")[1]
+  return marker_frame(self, name,
+    quote_identifier(source) .. " IS NOT NULL", "is_not_null")
+end
+
+-- True when a string column matches a SQL LIKE pattern.
+function DataFrame:like(column, pattern, name)
+  local source = string_marker_column(self, column, "like")
+  if type(pattern) ~= "string" then
+    error("like pattern must be a string", 2)
+  end
+  local literal = sql_scalar_literal(pattern, "like pattern")
+  return marker_frame(self, name,
+    quote_identifier(source) .. " LIKE " .. literal, "like")
+end
+
+-- True when a string column does not match a SQL LIKE pattern.
+function DataFrame:not_like(column, pattern, name)
+  local source = string_marker_column(self, column, "not_like")
+  if type(pattern) ~= "string" then
+    error("not_like pattern must be a string", 2)
+  end
+  local literal = sql_scalar_literal(pattern, "not_like pattern")
+  return marker_frame(self, name,
+    quote_identifier(source) .. " NOT LIKE " .. literal, "not_like")
+end
+
+-- True when a string column is empty or contains only whitespace.
+function DataFrame:is_blank(column, name)
+  local source = string_marker_column(self, column, "is_blank")
+  return marker_frame(self, name,
+    "TRIM(" .. quote_identifier(source) .. ") = ''", "is_blank")
+end
+
 -- Appends the first non-null value across the selected columns.
 function DataFrame:coalesce(columns, name)
   local selected = subset_columns(self, columns, "coalesce")

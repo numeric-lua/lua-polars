@@ -75,6 +75,7 @@ end
   `quantile`/`n_unique`/`first`/`last`/`product`/`corr`/`covar`/`covar_pop`,
   `any`/`all`, scalar `replace`, `filter_in`/`filter_not_in`,
   `contains`/`starts_with`/`ends_with`/`is_in`/`between` Boolean markers,
+  `is_null`/`is_not_null`/`like`/`not_like`/`is_blank` predicates,
   `coalesce`/`concat_str`/`lower`/`upper`/`length`/`trim`/`ltrim`/`rtrim`/
   `replace_str`/`substr`/`abs`/`round`/`floor`/`ceil`/`sign` derived columns,
   `year`/`month`/`day`/`hour`/`minute`/`second` and
@@ -162,11 +163,11 @@ Lines round-trips, lenient JSON Lines parsing, and JSON Lines string output,
 CSV low-memory and rechunked reads and CSV text output, scalar counts,
 statistical aggregates and quantiles, distinct counts, first/last values,
 products, correlations and covariances, boolean any/all, scalar replacement,
-membership filtering, string/range predicate markers, coalesced, trimmed,
-replaced, substring, absolute, rounded, floored, ceiled, and signed columns,
-calendar, clock, quarter, week, weekday, ordinal-day, and second extraction,
-row/column stacking, schema, estimated size, chunk counts, rechunking,
-shrinking,
+membership filtering, string/range/null/LIKE/blank predicate markers,
+coalesced, trimmed, replaced, substring, absolute, rounded, floored, ceiled,
+and signed columns, calendar, clock, quarter, week, weekday, ordinal-day, and
+second extraction, row/column stacking, schema, estimated size, chunk counts,
+rechunking, shrinking,
 head, tail, slice, row indexing, projection, row reversal, transpose,
 sortedness checks, cumulative transforms, struct unnest, strict casting, subset
 distinct rows, list-column explode, filtering, sorting with null placement,
@@ -305,6 +306,11 @@ df:starts_with("name", "a")
 df:ends_with("name", "a")
 df:is_in("team", { "red", "blue" })
 df:between("score", 7, 10)
+df:is_null("note")
+df:is_not_null("note")
+df:like("name", "a%")
+df:not_like("name", "a%")
+df:is_blank("note")
 df:coalesce({ "note", "name" })
 df:concat_str({ "name", "team" }, "-")
 df:lower("name")
