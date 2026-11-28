@@ -1352,6 +1352,54 @@ local minutes = df:minute("stamp")
 Non-temporal or unknown source columns, clock parts requested from date-only
 columns, empty or colliding output names, and closed frames are errors.
 
+### `df:quarter(column [, name]) -> DataFrame`
+
+Appends the quarter (`1`–`4`) of a `date` or `datetime` column named `name`
+(default `"quarter"`).
+
+```lua
+local quarters = df:quarter("day")
+```
+
+### `df:week(column [, name]) -> DataFrame`
+
+Appends the week number of a `date` or `datetime` column named `name` (default
+`"week"`). The value follows Polars' `DATE_PART('week', ...)` semantics.
+
+```lua
+local weeks = df:week("day")
+```
+
+### `df:weekday(column [, name]) -> DataFrame`
+
+Appends the weekday number (`1` = Monday through `7` = Sunday) of a `date` or
+`datetime` column named `name` (default `"weekday"`).
+
+```lua
+local weekdays = df:weekday("day")
+```
+
+### `df:day_of_year(column [, name]) -> DataFrame`
+
+Appends the 1-based day-of-year number of a `date` or `datetime` column named
+`name` (default `"day_of_year"`).
+
+```lua
+local ordinals = df:day_of_year("day")
+```
+
+### `df:second(column [, name]) -> DataFrame`
+
+Appends the second (`0`–`59`) of a `datetime` column named `name` (default
+`"second"`). Date-only columns are rejected.
+
+```lua
+local seconds = df:second("stamp")
+```
+
+Non-temporal or unknown source columns, second extraction from date-only
+columns, empty or colliding output names, and closed frames are errors.
+
 ### `df:drop(...) -> DataFrame`
 
 Returns a new frame without the named columns. Accepts one or more column-name

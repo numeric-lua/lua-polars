@@ -176,7 +176,16 @@
   and preserve every earlier default;
 - validation covers non-temporal or unknown columns, clock parts requested
   from date-only columns, colliding output names, and closed frames;
-- `./scripts/test.sh` passes 225 tests; `./scripts/smoke.sh` and
+- five more date/time extraction additions:
+  - `df:quarter(column [, name])`, `df:week(column [, name])`,
+    `df:weekday(column [, name])`, and `df:day_of_year(column [, name])`
+    append calendar parts from `date` or `datetime` columns;
+  - `df:second(column [, name])` appends the second from `datetime` columns;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers non-temporal or unknown columns, second extraction from
+  date-only columns, colliding output names, and closed frames;
+- `./scripts/test.sh` passes 227 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

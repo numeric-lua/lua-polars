@@ -2159,6 +2159,31 @@ function DataFrame:minute(column, name)
   return date_part_expression(self, column, "minute", "minute", name, true)
 end
 
+-- Appends the quarter of a date or datetime column.
+function DataFrame:quarter(column, name)
+  return date_part_expression(self, column, "quarter", "quarter", name, false)
+end
+
+-- Appends the week number of a date or datetime column.
+function DataFrame:week(column, name)
+  return date_part_expression(self, column, "week", "week", name, false)
+end
+
+-- Appends the weekday number of a date or datetime column.
+function DataFrame:weekday(column, name)
+  return date_part_expression(self, column, "dow", "weekday", name, false)
+end
+
+-- Appends the day-of-year number of a date or datetime column.
+function DataFrame:day_of_year(column, name)
+  return date_part_expression(self, column, "doy", "day_of_year", name, false)
+end
+
+-- Appends the second of a datetime column.
+function DataFrame:second(column, name)
+  return date_part_expression(self, column, "second", "second", name, true)
+end
+
 -- Distinct full rows with no argument, or distinct non-null values in a column.
 function DataFrame:n_unique(column)
   if column == nil then
