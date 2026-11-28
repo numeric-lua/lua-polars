@@ -78,7 +78,8 @@ end
   `is_null`/`is_not_null`/`like`/`not_like`/`is_blank` predicates,
   `coalesce`/`concat_str`/`lower`/`upper`/`length`/`trim`/`ltrim`/`rtrim`/
   `replace_str`/`substr`/`pad_left`/`pad_right`/`repeat_str`/`reverse_str`/
-  `capitalize`/`abs`/`round`/`floor`/`ceil`/`sign` and scalar
+  `capitalize`/`left`/`right`/`split_part`/`strpos`/`char_at`/`abs`/`round`/
+  `floor`/`ceil`/`sign` and scalar
   `add`/`subtract`/`multiply`/`divide`/`modulo` derived columns,
   `year`/`month`/`day`/`hour`/`minute`/`second` and
   `quarter`/`week`/`weekday`/`day_of_year` date/time parts, `top_k`/`bottom_k`,
@@ -167,10 +168,10 @@ statistical aggregates and quantiles, distinct counts, first/last values,
 products, correlations and covariances, boolean any/all, scalar replacement,
 membership filtering, string/range/null/LIKE/blank predicate markers,
 coalesced, trimmed, replaced, substring, padded, repeated, reversed,
-capitalized, absolute, rounded, floored, ceiled, signed, and scalar-arithmetic
-columns, calendar, clock, quarter, week, weekday, ordinal-day, and second
-extraction, row/column stacking, schema, estimated size, chunk counts,
-rechunking, shrinking,
+capitalized, left/right, split, substring-position, character, absolute,
+rounded, floored, ceiled, signed, and scalar-arithmetic columns, calendar,
+clock, quarter, week, weekday, ordinal-day, and second extraction, row/column
+stacking, schema, estimated size, chunk counts, rechunking, shrinking,
 head, tail, slice, row indexing, projection, row reversal, transpose,
 sortedness checks, cumulative transforms, struct unnest, strict casting, subset
 distinct rows, list-column explode, filtering, sorting with null placement,
@@ -339,6 +340,11 @@ df:pad_right("name", 5)
 df:repeat_str("name", 2)
 df:reverse_str("name")
 df:capitalize("name")
+df:left("name", 2)
+df:right("name", 2)
+df:split_part("name", "a", 2)
+df:strpos("name", "a")
+df:char_at("name", 2)
 df:year("day")
 df:month("day")
 df:day("day")

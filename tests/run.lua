@@ -5620,6 +5620,93 @@ test("string formatting helpers reject invalid arguments", function()
   truthy(tostring(err):find("closed", 1, true), "closed reverse_str error")
 end)
 
+test("left, right, split_part, strpos, and char_at append strings", function()
+  local df = polars.read_csv(fixture)
+  local left = df:left("name", 2)
+  eq(left:columns()[5], "left")
+  eq(left:to_table()[1].left, "an")
+  eq(left:to_table()[2].left, "bi")
+  left:close()
+  local right = df:right("name", 2, "suffix")
+  eq(right:to_table()[1].suffix, "na")
+  eq(right:to_table()[2].suffix, "ia")
+  right:close()
+  local split = df:split_part("name", "a", 2)
+  eq(split:to_table()[1].split_part, "n")
+  eq(split:to_table()[2].split_part, "")
+  split:close()
+  local position = df:strpos("name", "a")
+  eq(position:to_table()[1].strpos, 1)
+  eq(position:to_table()[2].strpos, 3)
+  position:close()
+  local character = df:char_at("name", 2)
+  eq(character:to_table()[1].char_at, "n")
+  eq(character:to_table()[2].char_at, "i")
+  character:close()
+  df:close()
+end)
+
+test("string indexing helpers reject invalid arguments", function()
+  local df = polars.read_csv(fixture)
+  for _, method in ipairs({ "left", "right", "split_part", "strpos",
+      "char_at" }) do
+    local ok, err = pcall(function() df[method](df, "score", 1) end)
+    eq(ok, false, method .. " accepted a numeric column")
+    truthy(tostring(err):find("str dtype", 1, true),
+      method .. " dtype error: " .. tostring(err))
+  end
+  for _, value in ipairs({ -1, 1.5, "2" }) do
+    local ok, err = pcall(function() df:left("name", value) end)
+    eq(ok, false, "left accepted invalid count")
+    truthy(tostring(err):find("non-negative integer", 1, true),
+      "left count error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:split_part("name", "", 1) end)
+  eq(ok, false, "split_part accepted an empty separator")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "split_part separator error: " .. tostring(err))
+  ok, err = pcall(function() df:split_part("name", "a", 0) end)
+  eq(ok, false, "split_part accepted zero index")
+  truthy(tostring(err):find("positive integer", 1, true),
+    "split_part index error: " .. tostring(err))
+  ok, err = pcall(function() df:strpos("name", "") end)
+  eq(ok, false, "strpos accepted an empty needle")
+  truthy(tostring(err):find("non-empty string", 1, true),
+    "strpos needle error: " .. tostring(err))
+  ok, err = pcall(function() df:char_at("name", 1.5) end)
+  eq(ok, false, "char_at accepted a fractional index")
+  truthy(tostring(err):find("positive integer", 1, true),
+    "char_at index error: " .. tostring(err))
+  for _, method in ipairs({ "left", "right", "split_part", "strpos",
+      "char_at" }) do
+    local collided, collision
+    if method == "left" or method == "right" then
+      collided, collision = pcall(function()
+        df[method](df, "name", 1, "name")
+      end)
+    elseif method == "split_part" then
+      collided, collision = pcall(function()
+        df:split_part("name", "a", 1, "name")
+      end)
+    elseif method == "strpos" then
+      collided, collision = pcall(function()
+        df:strpos("name", "a", "name")
+      end)
+    else
+      collided, collision = pcall(function()
+        df:char_at("name", 1, "name")
+      end)
+    end
+    eq(collided, false, method .. " accepted a colliding output")
+    truthy(tostring(collision):find("already exists", 1, true),
+      method .. " collision error: " .. tostring(collision))
+  end
+  df:close()
+  ok, err = pcall(function() df:left("name", 1) end)
+  eq(ok, false, "closed left accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed left error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

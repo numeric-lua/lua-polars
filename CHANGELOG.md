@@ -216,7 +216,20 @@
 - validation covers non-string columns, non-positive or fractional widths,
   empty fills, invalid repeat counts, colliding output names, and closed
   frames;
-- `./scripts/test.sh` passes 233 tests; `./scripts/smoke.sh` and
+- five more string indexing additions:
+  - `df:left(column, count [, name])` and `df:right(column, count [, name])`
+    append character prefixes and suffixes;
+  - `df:split_part(column, separator, index [, name])` appends one 1-based
+    split field;
+  - `df:strpos(column, needle [, name])` appends the 1-based substring
+    position, or zero when absent;
+  - `df:char_at(column, index [, name])` appends one 1-based character;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers non-string columns, negative or fractional counts and
+  indexes, empty separators or needles, colliding output names, and closed
+  frames;
+- `./scripts/test.sh` passes 235 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

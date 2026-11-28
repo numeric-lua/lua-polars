@@ -1363,6 +1363,56 @@ Non-string or unknown source columns, non-`str` dtypes, non-positive or
 fractional widths, empty fills, invalid repeat counts, empty or colliding
 output names, and closed frames are errors.
 
+### `df:left(column, count [, name]) -> DataFrame`
+
+Appends the first `count` characters of a `str` column named `name` (default
+`"left"`). `count` must be a non-negative integer.
+
+```lua
+local prefix = df:left("name", 2)
+```
+
+### `df:right(column, count [, name]) -> DataFrame`
+
+Appends the last `count` characters of a `str` column named `name` (default
+`"right"`).
+
+```lua
+local suffix = df:right("name", 2)
+```
+
+### `df:split_part(column, separator, index [, name]) -> DataFrame`
+
+Appends the 1-based field `index` from splitting a `str` column by the
+non-empty literal `separator`. The result is named `name` (default
+`"split_part"`). Missing fields produce an empty string.
+
+```lua
+local field = df:split_part("name", "a", 2)
+```
+
+### `df:strpos(column, needle [, name]) -> DataFrame`
+
+Appends the 1-based position of the non-empty literal `needle` in a `str`
+column, or `0` when absent, named `name` (default `"strpos"`).
+
+```lua
+local position = df:strpos("name", "a")
+```
+
+### `df:char_at(column, index [, name]) -> DataFrame`
+
+Appends the 1-based character at `index` from a `str` column, named `name`
+(default `"char_at"`). `index` must be a positive integer.
+
+```lua
+local character = df:char_at("name", 2)
+```
+
+Non-string or unknown source columns, non-`str` dtypes, negative or fractional
+counts and indexes, empty separators or needles, empty or colliding output
+names, and closed frames are errors.
+
 ### `df:abs(column [, name]) -> DataFrame`
 
 Appends the absolute value of a numeric column named `name` (default `"abs"`).

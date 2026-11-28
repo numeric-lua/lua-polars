@@ -2206,6 +2206,66 @@ function DataFrame:capitalize(column, name)
     ", 2))) END", "capitalize")
 end
 
+local function string_edge(self, column, count, function_name, label, name)
+  local source = string_marker_column(self, column, label)
+  if type(count) ~= "number" or count % 1 ~= 0 or count < 0 or
+      count > MAX_SAFE_INTEGER then
+    error(label .. " count must be a non-negative integer", 2)
+  end
+  return append_expression(self, name,
+    function_name .. "(" .. quote_identifier(source) .. ", " ..
+    tostring(count) .. ")", label)
+end
+
+-- Appends the first characters of a string column.
+function DataFrame:left(column, count, name)
+  return string_edge(self, column, count, "LEFT", "left", name)
+end
+
+-- Appends the last characters of a string column.
+function DataFrame:right(column, count, name)
+  return string_edge(self, column, count, "RIGHT", "right", name)
+end
+
+-- Appends one field of a string split by a literal separator.
+function DataFrame:split_part(column, separator, index, name)
+  local source = string_marker_column(self, column, "split_part")
+  if type(separator) ~= "string" or separator == "" then
+    error("split_part separator must be a non-empty string", 2)
+  end
+  if type(index) ~= "number" or index % 1 ~= 0 or index < 1 or
+      index > MAX_SAFE_INTEGER then
+    error("split_part index must be a positive integer", 2)
+  end
+  return append_expression(self, name,
+    "SPLIT_PART(" .. quote_identifier(source) .. ", " ..
+    sql_scalar_literal(separator, "split_part separator") .. ", " ..
+    tostring(index) .. ")", "split_part")
+end
+
+-- Appends the 1-based position of a literal substring, or zero if absent.
+function DataFrame:strpos(column, needle, name)
+  local source = string_marker_column(self, column, "strpos")
+  if type(needle) ~= "string" or needle == "" then
+    error("strpos needle must be a non-empty string", 2)
+  end
+  return append_expression(self, name,
+    "STRPOS(" .. quote_identifier(source) .. ", " ..
+    sql_scalar_literal(needle, "strpos needle") .. ")", "strpos")
+end
+
+-- Appends a single 1-based character from a string column.
+function DataFrame:char_at(column, index, name)
+  local source = string_marker_column(self, column, "char_at")
+  if type(index) ~= "number" or index % 1 ~= 0 or index < 1 or
+      index > MAX_SAFE_INTEGER then
+    error("char_at index must be a positive integer", 2)
+  end
+  return append_expression(self, name,
+    "SUBSTR(" .. quote_identifier(source) .. ", " .. tostring(index) ..
+    ", 1)", "char_at")
+end
+
 local function single_numeric_expression(self, column, function_name, label,
     name)
   local source = numeric_column_name(self, column, label)
