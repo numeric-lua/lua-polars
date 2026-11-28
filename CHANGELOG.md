@@ -196,7 +196,16 @@
   and preserve every earlier default;
 - validation covers unknown or non-string columns, wrong dtypes, non-string or
   NUL patterns, colliding marker names, and closed frames;
-- `./scripts/test.sh` passes 229 tests; `./scripts/smoke.sh` and
+- five scalar arithmetic additions:
+  - `df:add(column, value [, name])`, `df:subtract(column, value [, name])`,
+    and `df:multiply(column, value [, name])` append numeric result columns;
+  - `df:divide(column, value [, name])` and `df:modulo(column, value [, name])`
+    append results with a non-zero scalar;
+- these additions reuse the existing SQL entry point, add no C ABI symbols,
+  and preserve every earlier default;
+- validation covers non-numeric columns, non-finite scalars, zero divisors,
+  colliding output names, unknown columns, and closed frames;
+- `./scripts/test.sh` passes 231 tests; `./scripts/smoke.sh` and
   `./scripts/rockspec.sh` validate the installed layouts without a version or
   rockspec change.
 

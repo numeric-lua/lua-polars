@@ -2176,6 +2176,46 @@ function DataFrame:sign(column, name)
   return single_numeric_expression(self, column, "SIGN", "sign", name)
 end
 
+local function scalar_arithmetic(self, column, value, operator, label, name,
+    nonzero)
+  local source = numeric_column_name(self, column, label)
+  if type(value) ~= "number" or value ~= value or value == math.huge or
+      value == -math.huge then
+    error(label .. " value must be a finite number", 2)
+  end
+  if nonzero and value == 0 then
+    error(label .. " value must not be zero", 2)
+  end
+  return append_expression(self, name,
+    "(" .. quote_identifier(source) .. " " .. operator .. " " ..
+    string.format("%.17g", value) .. ")", label)
+end
+
+-- Appends a numeric column plus a scalar.
+function DataFrame:add(column, value, name)
+  return scalar_arithmetic(self, column, value, "+", "add", name, false)
+end
+
+-- Appends a numeric column minus a scalar.
+function DataFrame:subtract(column, value, name)
+  return scalar_arithmetic(self, column, value, "-", "subtract", name, false)
+end
+
+-- Appends a numeric column multiplied by a scalar.
+function DataFrame:multiply(column, value, name)
+  return scalar_arithmetic(self, column, value, "*", "multiply", name, false)
+end
+
+-- Appends a numeric column divided by a non-zero scalar.
+function DataFrame:divide(column, value, name)
+  return scalar_arithmetic(self, column, value, "/", "divide", name, true)
+end
+
+-- Appends a numeric column modulo a non-zero scalar.
+function DataFrame:modulo(column, value, name)
+  return scalar_arithmetic(self, column, value, "%", "modulo", name, true)
+end
+
 local function date_part_expression(self, column, part, label, name,
     datetime_only)
   local source = temporal_column_name(self, column, label, datetime_only)

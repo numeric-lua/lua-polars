@@ -5477,6 +5477,68 @@ test("null, LIKE, and blank predicates reject invalid inputs", function()
   truthy(tostring(err):find("closed", 1, true), "closed is_null error")
 end)
 
+test("scalar arithmetic helpers append numeric columns", function()
+  local df = polars.read_csv(fixture)
+  local added = df:add("score", 5)
+  eq(added:columns()[5], "add")
+  eq(added:to_table()[1].add, 15)
+  eq(added:to_table()[5].add, 14)
+  added:close()
+  local subtracted = df:subtract("score", 5, "minus")
+  eq(subtracted:to_table()[1].minus, 5)
+  subtracted:close()
+  local multiplied = df:multiply("score", 3)
+  eq(multiplied:to_table()[1].multiply, 30)
+  multiplied:close()
+  local divided = df:divide("score", 2)
+  eq(divided:to_table()[1].divide, 5)
+  truthy(math.abs(divided:to_table()[2].divide - 3.5) < 1e-12,
+    "unexpected division result")
+  divided:close()
+  local modulo = df:modulo("score", 4)
+  eq(modulo:to_table()[1].modulo, 2)
+  eq(modulo:to_table()[2].modulo, 3)
+  modulo:close()
+  df:close()
+end)
+
+test("scalar arithmetic helpers reject invalid arguments", function()
+  local df = polars.read_csv(fixture)
+  for _, method in ipairs({ "add", "subtract", "multiply", "divide",
+      "modulo" }) do
+    local ok, err = pcall(function() df[method](df, "name", 1) end)
+    eq(ok, false, method .. " accepted a string column")
+    truthy(tostring(err):find("must be numeric", 1, true),
+      method .. " dtype error: " .. tostring(err))
+    ok, err = pcall(function() df[method](df, "score", 1, "score") end)
+    eq(ok, false, method .. " accepted a colliding output")
+    truthy(tostring(err):find("already exists", 1, true),
+      method .. " collision error: " .. tostring(err))
+  end
+  for _, method in ipairs({ "add", "divide" }) do
+    for _, value in ipairs({ "1", 0 / 0, math.huge }) do
+      local ok, err = pcall(function() df[method](df, "score", value) end)
+      eq(ok, false, method .. " accepted an invalid scalar")
+      truthy(tostring(err):find("finite number", 1, true),
+        method .. " scalar error: " .. tostring(err))
+    end
+  end
+  for _, method in ipairs({ "divide", "modulo" }) do
+    local ok, err = pcall(function() df[method](df, "score", 0) end)
+    eq(ok, false, method .. " accepted zero")
+    truthy(tostring(err):find("must not be zero", 1, true),
+      method .. " zero error: " .. tostring(err))
+  end
+  local ok, err = pcall(function() df:add("missing", 1) end)
+  eq(ok, false, "add accepted an unknown column")
+  truthy(tostring(err):find("is not a column", 1, true),
+    "add unknown error: " .. tostring(err))
+  df:close()
+  ok, err = pcall(function() df:add("score", 1) end)
+  eq(ok, false, "closed add accepted")
+  truthy(tostring(err):find("closed", 1, true), "closed add error")
+end)
+
 cleanup_temp_files()
 
 test("drop_nulls and fill_null work on CSV nulls", function()

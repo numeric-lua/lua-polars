@@ -1357,6 +1357,54 @@ local signed = df:sign("score")
 Non-numeric or unknown source columns, negative or fractional decimal counts,
 empty or colliding output names, and closed frames are errors.
 
+### `df:add(column, value [, name]) -> DataFrame`
+
+Appends a numeric column named `name` (default `"add"`) containing the source
+column plus the finite scalar `value`.
+
+```lua
+local shifted = df:add("score", 5)
+```
+
+### `df:subtract(column, value [, name]) -> DataFrame`
+
+Appends the source column minus a finite scalar, named `name` (default
+`"subtract"`).
+
+```lua
+local shifted = df:subtract("score", 5)
+```
+
+### `df:multiply(column, value [, name]) -> DataFrame`
+
+Appends the source column multiplied by a finite scalar, named `name` (default
+`"multiply"`).
+
+```lua
+local scaled = df:multiply("score", 3)
+```
+
+### `df:divide(column, value [, name]) -> DataFrame`
+
+Appends the source column divided by a finite, non-zero scalar, named `name`
+(default `"divide"`). Integer columns may produce float results.
+
+```lua
+local halved = df:divide("score", 2)
+```
+
+### `df:modulo(column, value [, name]) -> DataFrame`
+
+Appends the source column modulo a finite, non-zero scalar, named `name`
+(default `"modulo"`).
+
+```lua
+local remainder = df:modulo("score", 4)
+```
+
+Non-numeric or unknown source columns, non-finite scalars, zero divisors,
+empty or colliding output names, and closed frames are errors.
+
 ### `df:year(column [, name]) -> DataFrame`
 
 Appends the year of a `date` or `datetime` column named `name` (default
